@@ -176,6 +176,76 @@ describe("下载加速与缓存", () => {
 	});
 });
 
+describe("异常上游与过期签名", () => {
+	it("上游返回 status 0 的 error response 时返回 502 而不是 500", async () => {
+		vi.stubGlobal("fetch", vi.fn(async () => Response.error()));
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://raw.githubusercontent.com/a/b/main/file.txt",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(502);
+	});
+
+	it("过期签名的 release-assets 链接返回带指引的 410 提示页", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("Forbidden", { status: 403 }))
+		);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=expired",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(410);
+		expect(response.headers.get("content-type")).toContain("text/html");
+		const html = await response.text();
+		expect(html).toContain("下载链接已过期");
+		expect(html).toContain("/https://github.com/用户/仓库/releases");
+	});
+
+	it("签名链接遇到 status 0 的 error response 也返回过期提示页", async () => {
+		vi.stubGlobal("fetch", vi.fn(async () => Response.error()));
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=expired",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(410);
+		expect(await response.text()).toContain("下载链接已过期");
+	});
+
+	it("签名有效的正常下载不受影响", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response("binary", {
+					status: 200,
+					headers: { "Content-Type": "application/octet-stream" },
+				})
+			)
+		);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=valid",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(200);
+	});
+});
+
 describe("内容链接重写", () => {
 	it("使用请求 Host 作为代理地址", async () => {
 		vi.stubGlobal(

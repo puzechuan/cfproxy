@@ -118,6 +118,33 @@ function uiResponse() {
   });
 }
 
+/** 一次性签名链接过期后，给出可操作的提示，而不是一个突兀的 500/403 */
+function expiredSignatureResponse(base) {
+  const html = `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>下载链接已过期 · CF Proxy</title><style>
+body{margin:0;background:#f7f7f7;color:#111;font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;display:grid;place-items:center;min-height:100vh}
+.card{background:#fff;border:1px solid #e7e7e7;border-radius:22px;padding:32px;max-width:640px; margin:20px}
+h1{font-size:20px;margin:0 0 12px}p{margin:8px 0;color:#444}
+code{display:block;background:#f2f2f2;border-radius:10px;padding:12px 14px;margin-top:12px;word-break:break-all;font-size:13px}
+a{color:#111;font-weight:600}
+</style></head><body><div class="card">
+<h1>下载链接已过期</h1>
+<p>这是 GitHub 生成的一次性签名下载链接，有效期约 1 小时，现在已经失效了。</p>
+<p>请从<b>干净的 Release 页面链接</b>重新进入，代理会自动获取新的签名，地址栏不会变成签名链接：</p>
+<code>${base}/https://github.com/用户/仓库/releases</code>
+<p style="margin-top:14px"><a href="${base}/">返回代理首页 →</a></p>
+</div></body></html>`;
+  return new Response(html, {
+    status: 410,
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Cache-Control": "no-store",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -211,6 +238,14 @@ function toProxyPath(absolute) {
 
 /* ------------------------------ 下载资源判定 ------------------------------ */
 
+/** GitHub Release 的一次性签名下载链接（有效期约 1 小时） */
+function isSignedAsset(target) {
+  const host = target.hostname.toLowerCase();
+  if (host !== "release-assets.githubusercontent.com" &&
+      host !== "objects.githubusercontent.com") return false;
+  return target.searchParams.has("sig") || target.searchParams.has("jwt");
+}
+
 function isDownloadAsset(target) {
   const host = target.hostname.toLowerCase();
   if (ASSET_HOSTS.has(host)) return true;
@@ -302,7 +337,19 @@ function isCacheable(target) {
   return false;
 }
 
+/**
+ * fetch 在网络层失败时可能返回 status = 0 的 Response.error()，
+ * 直接把它传给 new Response() 会抛 RangeError（status 必须 200-599），
+ * 表现为整个代理返回 500。这里统一收敛成可返回的 HTTP 状态。
+ */
+function normalizeStatus(status) {
+  return Number.isInteger(status) && status >= 200 && status <= 599
+    ? status
+    : 502;
+}
+
 async function buildResponse(upstream, target, base, options = {}) {
+  const status = normalizeStatus(upstream.status);
   const headers = new Headers();
   for (const [key, value] of upstream.headers.entries()) {
     if (!RESP_SKIP.has(key.toLowerCase())) headers.set(key, value);
@@ -312,8 +359,7 @@ async function buildResponse(upstream, target, base, options = {}) {
 
   // Release 资产内容不可变，允许浏览器缓存一天：二次下载连 Worker 都不经过。
   // 重定向与文本页面仍禁止缓存，避免旧签名链接残留在浏览器缓存里。
-  const cacheableAsset =
-    options.asset && upstream.status >= 200 && upstream.status < 300;
+  const cacheableAsset = options.asset && status >= 200 && status < 300;
   headers.set(
     "Cache-Control",
     cacheableAsset ? "public, max-age=86400" : "no-store"
@@ -333,8 +379,8 @@ async function buildResponse(upstream, target, base, options = {}) {
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
   const shouldRewrite =
-    upstream.status >= 200 &&
-    upstream.status < 400 &&
+    status >= 200 &&
+    status < 400 &&
     upstream.body &&
     (contentType.includes("text/html") ||
       contentType.includes("json") ||
@@ -350,7 +396,7 @@ async function buildResponse(upstream, target, base, options = {}) {
       ? rewriteHtml(text, base, target.hostname)
       : rewriteUrls(text, base);
     return new Response(text, {
-      status: upstream.status,
+      status,
       statusText: upstream.statusText,
       headers,
     });
@@ -358,7 +404,7 @@ async function buildResponse(upstream, target, base, options = {}) {
 
   // 二进制内容（git 协议、压缩包、图片）流式透传，保留 206 / Content-Range / Content-Length
   return new Response(upstream.body, {
-    status: upstream.status,
+    status,
     statusText: upstream.statusText,
     headers,
   });
@@ -526,6 +572,18 @@ async function handleRequest(request, env, ctx) {
     asset,
     cacheKey: cacheKey || undefined,
   });
+
+  // 一次性签名链接过期后源站返回 403/404，网络层失败时还会得到 status 0 的
+  // Response.error()。直接透传会变成含义不明的 500。统一换成带操作指引的提示页，
+  // 引导用户回到干净的 releases 链接重新获取新签名。
+  if (isSignedAsset(target) && normalizeStatus(upstream.status) >= 400) {
+    logEvent("expired_signature", {
+      url: safeUrl(target),
+      status: upstream.status,
+      ms: Date.now() - started,
+    });
+    return expiredSignatureResponse(base);
+  }
 
   // Range 未命中时后台预热完整对象，后续任意区间都能走边缘缓存
   if (asset && method === "GET" && request.headers.has("range")) {
