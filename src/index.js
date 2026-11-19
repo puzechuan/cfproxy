@@ -1,14 +1,20 @@
 /**
  * Cloudflare Worker · GitHub 反向代理加速
  *
- * 源码文件：src/worker.js（本文件）
- * 部署文件：worker.js（由 npm run build 生成，自包含，可直接粘贴到 Workers 控制台）
- *
  * 用法：https://你的域名/https://github.com/用户/仓库
  *       https://你的域名/?url=https://raw.githubusercontent.com/...
+ *
+ * 设计要点：
+ * 1. 普通页面：手动处理重定向并重写 Location，保证链接不跳出代理域名。
+ * 2. 下载资源（Release / codeload / 对象存储）：Worker 内部跟随重定向，
+ *    浏览器始终只看到干净的原始代理链接，少一次完整往返。
+ * 3. 下载资源使用稳定 cacheKey（剥离每次都变的签名查询串），
+ *    边缘缓存可以真正命中，重复下载由 CF 边缘直接返回。
+ * 4. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
+ * 5. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
  */
 
-// 静态页面在构建时由 index.html 注入；本地直接运行时为空串，请以 worker.js 为准
+// 静态页面在构建时由 index.html 注入；本地直接运行时为空串，请以部署版本为准
 const UI_HTML = "__UI_HTML__";
 
 // 允许代理的源站，防止被当作开放代理滥用
@@ -43,10 +49,11 @@ const REQ_SKIP = new Set([
   "x-forwarded-proto", "x-forwarded-port", "x-forwarded-server",
 ]);
 
-// 回包中需要移除的头：内容改写后长度/编码已失效
+// 回包中必须移除的 hop-by-hop / 内部头。
+// content-length / content-encoding 对二进制透传是有意义的，只在文本改写时删除。
 const RESP_SKIP = new Set([
-  "set-cookie", "content-encoding", "content-length",
-  "transfer-encoding", "connection", "keep-alive", "upgrade", "cf-ray",
+  "set-cookie", "transfer-encoding", "connection", "keep-alive",
+  "upgrade", "cf-ray",
 ]);
 
 const STATIC_EXT =
@@ -61,6 +68,13 @@ const CACHEABLE_HOSTS = new Set([
   "user-images.githubusercontent.com",
   "githubusercontent.com",
 ]);
+
+const ASSET_HOSTS = new Set([
+  "codeload.github.com",
+  "objects.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+]);
+const RELEASE_DOWNLOAD = /\/releases\/download\//i;
 
 /* ---------------------------------- 工具 ---------------------------------- */
 
@@ -99,6 +113,24 @@ function escapeRegExp(s) {
 
 function slashEscape(s) {
   return s.replace(/\//g, "\\/");
+}
+
+/** 结构化日志：Workers Logs 会按字段建立索引，便于按事件/状态过滤 */
+function logEvent(event, fields) {
+  try {
+    console.log(Object.assign({ event, ts: new Date().toISOString() }, fields || {}));
+  } catch (e) {
+    /* 日志失败不影响代理 */
+  }
+}
+
+/** 签名链接含凭据，日志中只保留路径 */
+function safeUrl(target) {
+  const u = new URL(target.toString());
+  if (u.searchParams.has("sig") || u.searchParams.has("jwt")) {
+    u.search = "?<redacted>";
+  }
+  return u.toString();
 }
 
 /* ------------------------------ 目标 URL 解析 ------------------------------ */
@@ -142,14 +174,51 @@ function extractTarget(request) {
   return { target };
 }
 
-function toProxyUrl(base, absolute) {
+/**
+ * 代理地址优先取请求的 Host，而不是 url.origin。
+ * 自定义域名经 CNAME/内部路由进入 Worker 时，url.origin 可能是 workers.dev，
+ * 会导致生成的 Location 跳回 workers.dev。
+ */
+function publicBase(request, url) {
+  const host = request.headers.get("host");
+  if (host && !host.toLowerCase().endsWith(".workers.dev")) {
+    return url.protocol + "//" + host;
+  }
+  return url.origin;
+}
+
+/** 重定向使用相对路径，浏览器会按当前访问域名解析，避免跨域跳转 */
+function toProxyPath(absolute) {
   try {
     const u = new URL(absolute);
     if (u.protocol !== "https:" && u.protocol !== "http:") return absolute;
-    return base + "/" + u.toString();
+    return "/" + u.toString();
   } catch (e) {
     return absolute;
   }
+}
+
+/* ------------------------------ 下载资源判定 ------------------------------ */
+
+function isDownloadAsset(target) {
+  const host = target.hostname.toLowerCase();
+  if (ASSET_HOSTS.has(host)) return true;
+  if ((host === "github.com" || host === "www.github.com") &&
+      RELEASE_DOWNLOAD.test(target.pathname)) return true;
+  return STATIC_EXT.test(target.pathname);
+}
+
+/**
+ * 稳定缓存键：签名查询串每次请求都不同，必须剥离，否则缓存永远无法命中。
+ * github.com 的原始下载地址本身稳定，可以连同查询串一起作为键。
+ */
+function assetCacheKey(target) {
+  const host = target.hostname.toLowerCase();
+  if (host === "release-assets.githubusercontent.com" ||
+      host === "objects.githubusercontent.com") {
+    return "cfproxy:asset:" + host + target.pathname;
+  }
+  return "cfproxy:asset:" + host + target.pathname + target.search;
 }
 
 /* ------------------------------ 内容链接重写 ------------------------------ */
@@ -227,6 +296,9 @@ async function buildResponse(upstream, target, base) {
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Expose-Headers", "*");
 
+  // 浏览器不缓存代理响应；边缘缓存由 fetch 的 cf.cacheTtlByStatus 控制，不受影响。
+  headers.set("Cache-Control", "no-store");
+
   // 重定向地址必须指回代理，否则浏览器会直连 GitHub
   const location = upstream.headers.get("location");
   if (location) {
@@ -236,7 +308,7 @@ async function buildResponse(upstream, target, base) {
     } catch (e) {
       /* 保留原值 */
     }
-    headers.set("Location", toProxyUrl(base, resolved));
+    headers.set("Location", toProxyPath(resolved));
   }
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
@@ -250,6 +322,9 @@ async function buildResponse(upstream, target, base) {
       contentType.includes("ecmascript"));
 
   if (shouldRewrite) {
+    // 改写后长度与编码都失效
+    headers.delete("content-length");
+    headers.delete("content-encoding");
     let text = await upstream.text();
     text = contentType.includes("text/html")
       ? rewriteHtml(text, base, target.hostname)
@@ -261,7 +336,7 @@ async function buildResponse(upstream, target, base) {
     });
   }
 
-  // 二进制内容（git 协议、压缩包、图片）直接流式透传，保留 206 / Content-Range
+  // 二进制内容（git 协议、压缩包、图片）流式透传，保留 206 / Content-Range / Content-Length
   return new Response(upstream.body, {
     status: upstream.status,
     statusText: upstream.statusText,
@@ -269,67 +344,175 @@ async function buildResponse(upstream, target, base) {
   });
 }
 
+const CACHE_TTL = {
+  "200-299": 86400,
+  "404": 300,
+  "500-599": -1,
+};
+
+/**
+ * Range 请求只会让边缘缓存记住这一段，不同区间依然回源。
+ * 在后台拉取完整对象（按块丢弃，不占用内存），把完整文件写进边缘缓存，
+ * 之后任意区间都能命中。失败不影响已返回给客户端的响应。
+ */
+async function warmFullAsset(target, headers, cacheCf) {
+  const warmHeaders = new Headers(headers);
+  warmHeaders.delete("range");
+  warmHeaders.delete("if-range");
+  try {
+    const upstream = await fetch(
+      new Request(target.toString(), {
+        method: "GET",
+        headers: warmHeaders,
+        redirect: "follow",
+        cf: cacheCf,
+      })
+    );
+    logEvent("warm", {
+      url: safeUrl(target),
+      status: upstream.status,
+      cache: upstream.headers.get("cf-cache-status"),
+      length: upstream.headers.get("content-length"),
+    });
+    if (upstream.body) {
+      const reader = upstream.body.getReader();
+      while (true) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    }
+  } catch (e) {
+    logEvent("warm_error", { url: safeUrl(target), error: String(e) });
+  }
+}
+
 /* ---------------------------------- 入口 ---------------------------------- */
+
+async function handleRequest(request, env, ctx) {
+  const started = Date.now();
+  const url = new URL(request.url);
+  const base = publicBase(request, url);
+  const path = url.pathname || "/";
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders() });
+  }
+  if (path === "/health") {
+    return json({ ok: true, service: "cfproxy", time: new Date().toISOString() });
+  }
+  if (path === "/favicon.ico") {
+    return new Response(null, { status: 204 });
+  }
+  if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
+    return uiResponse();
+  }
+
+  const probe = extractTarget(request);
+  if (!probe) return uiResponse();
+  if (probe.error) {
+    logEvent("bad_target", { error: probe.error });
+    return json(
+      {
+        error: probe.error,
+        hint: "正确格式：" + base + "/https://github.com/用户/仓库",
+      },
+      400
+    );
+  }
+
+  const target = probe.target;
+  const method = request.method;
+  const isRead = method === "GET" || method === "HEAD";
+  const asset = isRead && isDownloadAsset(target);
+  const cacheKey = asset ? assetCacheKey(target) : null;
+
+  logEvent("request", {
+    method,
+    url: safeUrl(target),
+    asset,
+    colo: request.cf && request.cf.colo,
+    country: request.cf && request.cf.country,
+    range: isRead ? request.headers.get("range") : null,
+  });
+
+  const headers = upstreamHeaders(request);
+  const assetCacheCf = asset
+    ? {
+        cacheKey,
+        cacheEverything: true,
+        cacheTtlByStatus: Object.assign({}, CACHE_TTL, { "301,302": 0 }),
+      }
+    : null;
+  let upstream;
+  try {
+    if (asset) {
+      // 服务端跟随重定向：浏览器只访问干净链接，缓存键稳定，少一次完整往返。
+      const subRequest = new Request(target.toString(), {
+        method,
+        headers,
+        redirect: "follow",
+        cf: assetCacheCf,
+      });
+      upstream = await fetch(subRequest);
+    } else {
+      const init = {
+        method,
+        headers,
+        redirect: "manual", // 由自己重写 Location，避免浏览器直连源站
+      };
+      if (!isRead) {
+        init.body = request.body;
+        init.duplex = "half";
+      }
+      if (isRead && isCacheable(target)) {
+        init.cf = { cacheEverything: true, cacheTtlByStatus: CACHE_TTL };
+      }
+      upstream = await fetch(target.toString(), init);
+    }
+  } catch (e) {
+    logEvent("upstream_error", {
+      url: safeUrl(target),
+      error: String(e),
+      ms: Date.now() - started,
+    });
+    return json({ error: "上游请求失败", detail: String(e) }, 502);
+  }
+
+  logEvent("upstream", {
+    url: safeUrl(target),
+    status: upstream.status,
+    cache: upstream.headers.get("cf-cache-status"),
+    ms: Date.now() - started,
+    asset,
+    cacheKey: cacheKey || undefined,
+  });
+
+  // Range 未命中时后台预热完整对象，后续任意区间都能走边缘缓存
+  if (asset && method === "GET" && request.headers.has("range")) {
+    const cacheStatus = upstream.headers.get("cf-cache-status") || "";
+    if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
+      ctx.waitUntil(warmFullAsset(target, headers, assetCacheCf));
+    }
+  }
+
+  const response = await buildResponse(upstream, target, base);
+  logEvent("respond", {
+    url: safeUrl(target),
+    status: response.status,
+    length: response.headers.get("content-length"),
+    cache: response.headers.get("cf-cache-status"),
+    ms: Date.now() - started,
+  });
+  return response;
+}
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const base = url.origin;
-    const path = url.pathname || "/";
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders() });
-    }
-    if (path === "/health") {
-      return json({ ok: true, service: "cfproxy", time: new Date().toISOString() });
-    }
-    if (path === "/favicon.ico") {
-      return new Response(null, { status: 204 });
-    }
-    if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
-      return uiResponse();
-    }
-
-    const probe = extractTarget(request);
-    if (!probe) return uiResponse();
-    if (probe.error) {
-      return json(
-        {
-          error: probe.error,
-          hint: "正确格式：" + base + "/https://github.com/用户/仓库",
-        },
-        400
-      );
-    }
-
-    const target = probe.target;
-    const init = {
-      method: request.method,
-      headers: upstreamHeaders(request),
-      redirect: "manual", // 由自己重写 Location，避免浏览器直连源站
-    };
-    if (request.method !== "GET" && request.method !== "HEAD") {
-      init.body = request.body;
-      init.duplex = "half";
-    }
-    if ((request.method === "GET" || request.method === "HEAD") && isCacheable(target)) {
-      init.cf = {
-        cacheEverything: true,
-        cacheTtlByStatus: {
-          "200-299": 86400,
-          "301,302": 3600,
-          "404": 300,
-          "500-599": 0,
-        },
-      };
-    }
-
-    let upstream;
     try {
-      upstream = await fetch(target.toString(), init);
+      return await handleRequest(request, env, ctx);
     } catch (e) {
-      return json({ error: "上游请求失败", detail: String(e) }, 502);
+      logEvent("internal_error", { error: String(e) });
+      return json({ error: "代理内部错误", detail: String(e) }, 500);
     }
-    return buildResponse(upstream, target, base);
   },
 };
