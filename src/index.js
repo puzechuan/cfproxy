@@ -19,7 +19,7 @@
 const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.1";
+const BUILD_ID = "2026-11-20.3";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -111,12 +111,16 @@ function corsHeaders() {
   };
 }
 
-function json(data, status = 200) {
+function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: Object.assign(
-      { "Content-Type": "application/json; charset=UTF-8" },
-      corsHeaders()
+      {
+        "Content-Type": "application/json; charset=UTF-8",
+        "Cache-Control": "no-store",
+      },
+      corsHeaders(),
+      headers
     ),
   });
 }
@@ -295,6 +299,103 @@ function assetCacheKey(target) {
   return "cfproxy:asset:" + host + target.pathname + target.search;
 }
 
+/* ------------------------------ 回源线路选择 ------------------------------ */
+
+/**
+ * Workers 无法指定上游 IP：cf.resolveOverride 只对自有 zone 内的域名生效。
+ * 这里能做的是把"线路"抽象成可替换的入口 URL：默认直连 GitHub，
+ * 可通过 UPSTREAM_MIRRORS（JSON 数组，按优先级排序）配置可信的加速入口，
+ * 失败时自动切到下一条。缓存键始终用原始 GitHub URL，切换线路不会丢缓存。
+ */
+function upstreamRoutes(target, env) {
+  const routes = [];
+  const raw = env && env.UPSTREAM_MIRRORS;
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const base of parsed) {
+          if (typeof base !== "string" || !/^https:\/\//i.test(base)) continue;
+          const clean = base.replace(/\/+$/, "");
+          let name;
+          try {
+            name = new URL(clean).hostname;
+          } catch (e) {
+            continue;
+          }
+          routes.push({ name, url: clean + "/" + target.toString() });
+        }
+      }
+    } catch (e) {
+      logEvent("bad_mirror_config", { error: String(e) });
+    }
+  }
+  // 官方线路兜底：github.com 与 www.github.com 等价，可作为备用线路
+  routes.push({ name: "direct", url: target.toString() });
+  if (target.hostname === "github.com") {
+    const alternate = new URL(target.toString());
+    alternate.hostname = "www.github.com";
+    routes.push({ name: "www.github.com", url: alternate.toString() });
+  }
+  return routes;
+}
+
+/** 只探测入口连通性与延迟；结果供 UPSTREAM_MIRRORS 排序参考 */
+async function probeUpstreams(request, env) {
+  const raw = env && env.UPSTREAM_MIRRORS;
+  const probes = [{ name: "direct", url: "https://github.com/" }];
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const base of parsed) {
+          if (typeof base !== "string" || !/^https:\/\//i.test(base)) continue;
+          const clean = base.replace(/\/+$/, "");
+          probes.push({
+            name: new URL(clean).hostname,
+            url: clean + "/https://github.com/",
+          });
+        }
+      }
+    } catch (e) {
+      /* 配置错误时在 __probe 结果中体现，不影响原有直连 */
+    }
+  }
+
+  const results = await Promise.all(
+    probes.map(async (probe) => {
+      const started = Date.now();
+      let status = 0;
+      try {
+        const response = await fetch(
+          new Request(probe.url, {
+            method: "HEAD",
+            headers: { "user-agent": DEFAULT_UA },
+            cache: "no-store",
+            signal: AbortSignal.timeout(4000),
+          })
+        );
+        status = response.status;
+      } catch (e) {
+        status = 0;
+      }
+      return { name: probe.name, status, ms: Date.now() - started };
+    })
+  );
+  const usable = (x) => x.status >= 200 && x.status < 400;
+  results.sort(
+    (a, b) => (usable(a) ? a.ms : Number.MAX_SAFE_INTEGER) -
+      (usable(b) ? b.ms : Number.MAX_SAFE_INTEGER)
+  );
+  return {
+    ok: true,
+    colo: (request.cf && request.cf.colo) || null,
+    results,
+    winner: results.length && usable(results[0]) ? results[0].name : null,
+    hint: "HEAD 延迟仅供参考；按延迟把优选入口写入 UPSTREAM_MIRRORS（JSON 数组），第一项为首选",
+  };
+}
+
 /* ------------------------------ 内容链接重写 ------------------------------ */
 
 /** 重写文本中的绝对 URL、JSON 里的转义 URL、协议相对 URL */
@@ -458,7 +559,7 @@ const ASSET_CACHE_CF = {
  */
 const inFlightWarms = new Map();
 
-function warmAsset(target, cacheCf) {
+function warmAsset(target, cacheCf, routeUrl) {
   const key = cacheCf.cacheKey;
   const existing = inFlightWarms.get(key);
   if (existing) {
@@ -473,7 +574,7 @@ function warmAsset(target, cacheCf) {
       accept: "application/octet-stream,application/zip,*/*",
     });
     const upstream = await fetch(
-      new Request(target.toString(), {
+      new Request(routeUrl || target.toString(), {
         method: "GET",
         headers: warmHeaders,
         redirect: "follow",
@@ -515,10 +616,10 @@ function warmAsset(target, cacheCf) {
 }
 
 /** 预热完成后再发一个 1 字节 Range 请求，确认边缘缓存真的可命中 */
-async function warmCacheStatus(target, cacheCf) {
+async function warmCacheStatus(target, cacheCf, routeUrl) {
   try {
     const verify = await fetch(
-      new Request(target.toString(), {
+      new Request(routeUrl || target.toString(), {
         method: "GET",
         headers: { Range: "bytes=0-0", "user-agent": DEFAULT_UA },
         cf: cacheCf,
@@ -574,11 +675,29 @@ async function handleRequest(request, env, ctx) {
       ASSET_CACHE_CF
     );
     try {
-      const result = await warmAsset(target, cacheCf);
-      let cache = await warmCacheStatus(target, cacheCf);
+      const routes = upstreamRoutes(target, env);
+      let result;
+      let warmUrl = target.toString();
+      let lastError;
+      for (const candidate of routes) {
+        try {
+          warmUrl = candidate.url;
+          result = await warmAsset(target, cacheCf, warmUrl);
+          break;
+        } catch (e) {
+          lastError = e;
+          logEvent("upstream_failover", {
+            url: safeUrl(target),
+            route: candidate.name,
+            error: String(e),
+          });
+        }
+      }
+      if (!result) throw lastError || new Error("所有回源线路均不可用");
+      let cache = await warmCacheStatus(target, cacheCf, warmUrl);
       // 任意播可能把两次请求落到不同机房，MISS 时再确认一次
       if (cache === "MISS" || cache === "BYPASS") {
-        cache = await warmCacheStatus(target, cacheCf);
+        cache = await warmCacheStatus(target, cacheCf, warmUrl);
       }
       logEvent("warm_api", {
         url: safeUrl(target),
@@ -598,6 +717,11 @@ async function handleRequest(request, env, ctx) {
       logEvent("warm_api_error", { url: safeUrl(target), error: String(e) });
       return json({ ok: false, error: String(e) }, 502);
     }
+  }
+
+  // 回源线路探测：告诉你这个入口机房到各条线路的延迟
+  if (path === "/__probe") {
+    return json(await probeUpstreams(request, env));
   }
 
   if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
@@ -637,16 +761,51 @@ async function handleRequest(request, env, ctx) {
     ? Object.assign({ cacheKey }, ASSET_CACHE_CF)
     : null;
   let upstream;
+  let route = "direct";
+  let upstreamUrl = target.toString();
   try {
     if (asset) {
       // 服务端跟随重定向：浏览器只访问干净链接，缓存键稳定，少一次完整往返。
-      const subRequest = new Request(target.toString(), {
-        method,
-        headers,
-        redirect: "follow",
-        cf: assetCacheCf,
-      });
-      upstream = await fetch(subRequest);
+      // 线路按 UPSTREAM_MIRRORS 优先级尝试，失败自动切下一条；
+      // cacheKey 始终基于原始 URL，所以换线路不会让边缘缓存失效。
+      const routes = upstreamRoutes(target, env);
+      let lastError;
+      for (let i = 0; i < routes.length; i++) {
+        const candidate = routes[i];
+        const routeHeaders = new Headers(headers);
+        if (candidate.name !== "direct") routeHeaders.delete("authorization");
+        try {
+          const subRequest = new Request(candidate.url, {
+            method,
+            headers: routeHeaders,
+            redirect: "follow",
+            cf: assetCacheCf,
+          });
+          const result = await fetch(subRequest);
+          const status = normalizeStatus(result.status);
+          if (status >= 500 && i < routes.length - 1) {
+            logEvent("upstream_failover", {
+              url: safeUrl(target),
+              route: candidate.name,
+              status,
+            });
+            if (result.body) await result.body.cancel();
+            continue;
+          }
+          upstream = result;
+          route = candidate.name;
+          upstreamUrl = candidate.url;
+          break;
+        } catch (e) {
+          lastError = e;
+          logEvent("upstream_failover", {
+            url: safeUrl(target),
+            route: candidate.name,
+            error: String(e),
+          });
+        }
+      }
+      if (!upstream) throw lastError || new Error("所有回源线路均不可用");
     } else {
       const init = {
         method,
@@ -677,6 +836,7 @@ async function handleRequest(request, env, ctx) {
     cache: upstream.headers.get("cf-cache-status"),
     ms: Date.now() - started,
     asset,
+    route,
     cacheKey: cacheKey || undefined,
   });
 
@@ -696,13 +856,14 @@ async function handleRequest(request, env, ctx) {
   if (asset && method === "GET" && request.headers.has("range")) {
     const cacheStatus = upstream.headers.get("cf-cache-status") || "";
     if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
-      ctx.waitUntil(warmAsset(target, assetCacheCf).catch((e) => {
+      ctx.waitUntil(warmAsset(target, assetCacheCf, upstreamUrl).catch((e) => {
         logEvent("warm_error", { url: safeUrl(target), error: String(e) });
       }));
     }
   }
 
   const response = await buildResponse(upstream, target, base, { asset });
+  response.headers.set("X-CFProxy-Route", route);
   logEvent("respond", {
     url: safeUrl(target),
     status: response.status,

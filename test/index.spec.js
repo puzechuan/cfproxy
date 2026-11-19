@@ -401,6 +401,92 @@ describe("显式预热接口", () => {
 	});
 });
 
+describe("回源线路优选", () => {
+	const assetUrl = "https://github.com/foo/bar/releases/download/v1/tool.tar.gz";
+
+	async function callWith(request, customEnv) {
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(request, customEnv, ctx);
+		await waitOnExecutionContext(ctx);
+		return response;
+	}
+
+	function assetRequest() {
+		return new Request("http://example.com/" + assetUrl, {
+			headers: { Host: "cfproxy.koomer.site" },
+		});
+	}
+
+	it("配置镜像后走镜像，但缓存键仍基于原始 GitHub URL", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response("binary", { status: 200 })
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await callWith(assetRequest(), {
+			UPSTREAM_MIRRORS: JSON.stringify(["https://mirror.example"]),
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cfproxy-route")).toBe("mirror.example");
+		const sub = fetchMock.mock.calls[0][0];
+		expect(sub.url).toBe("https://mirror.example/" + assetUrl);
+		expect(sub.cf.cacheKey).toBe(
+			"cfproxy:asset:github.com/foo/bar/releases/download/v1/tool.tar.gz"
+		);
+	});
+
+	it("首选线路 5xx 或网络失败时自动切到下一条", async () => {
+		const fetchMock = vi.fn(async (req) => {
+			if (req.url.startsWith("https://mirror1.example")) {
+				return new Response("bad", { status: 503 });
+			}
+			if (req.url.startsWith("https://mirror2.example")) {
+				throw new Error("network down");
+			}
+			return new Response("binary", { status: 200 });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await callWith(assetRequest(), {
+			UPSTREAM_MIRRORS: JSON.stringify([
+				"https://mirror1.example",
+				"https://mirror2.example",
+			]),
+		});
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("x-cfproxy-route")).toBe("direct");
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("/__probe 返回官方线路与已配置镜像的延迟", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(null, { status: 200 }))
+		);
+
+		const response = await callWith(
+			new Request("http://example.com/__probe"),
+			{ UPSTREAM_MIRRORS: JSON.stringify(["https://mirror.example"]) }
+		);
+		expect(response.status).toBe(200);
+		const data = await response.json();
+		expect(data.ok).toBe(true);
+		expect(data.results.length).toBe(2);
+		expect(data.results.map((x) => x.name).sort()).toEqual([
+			"direct",
+			"mirror.example",
+		]);
+		expect(data.winner).toBeTruthy();
+	});
+
+	it("/health 不缓存，便于确认线上版本", async () => {
+		const response = await call(new Request("http://example.com/health"));
+		expect(response.headers.get("cache-control")).toBe("no-store");
+	});
+});
+
 describe("内容链接重写", () => {
 	it("使用请求 Host 作为代理地址", async () => {
 		vi.stubGlobal(

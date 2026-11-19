@@ -74,6 +74,11 @@
   .msg.ok::before { content: "●"; font-size: 9px; vertical-align: 2px; margin-right: 7px; }
   .msg.err { color: var(--text); }
   .msg.err::before { content: "○"; font-size: 11px; vertical-align: 1px; margin-right: 7px; }
+  .probe-result {
+    margin: 16px 0 0; padding: 14px 16px; background: var(--chip);
+    border-radius: var(--r-sm); font: 12.5px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all;
+  }
   .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
   .link {
     text-align: left; height: auto; padding: 14px 16px; background: #fff;
@@ -146,6 +151,13 @@
         <button class="link" data-url="https://codeload.github.com/torvalds/linux/zip/refs/heads/master">源码压缩包<small>codeload.github.com</small></button>
         <button class="link" data-url="https://github.com/microsoft/vscode/releases">Release 页面<small>大文件下载</small></button>
       </div>
+    </section>
+
+    <section class="card">
+      <h2>回源线路探测</h2>
+      <p class="msg" style="margin-top:0">测量当前入口机房到 GitHub 官方线路及已配置镜像的延迟，用于调整优选顺序。</p>
+      <button class="ghost" id="probeBtn">开始探测</button>
+      <pre id="probeResult" class="probe-result" hidden></pre>
     </section>
 
   </main>
@@ -293,6 +305,28 @@
   $('copyBtn').addEventListener('click', function () { copy($('result').value, this); });
   $('warmBtn').addEventListener('click', function () { warmCache(this); });
   $('copyCloneBtn').addEventListener('click', function () { copy($('clone').value, this); });
+
+  function probeRoutes(btn) {
+    var box = $('probeResult');
+    var old = btn.textContent;
+    btn.textContent = '探测中…';
+    btn.disabled = true;
+    box.hidden = false;
+    box.textContent = '正在测速…';
+    fetch(base() + '/__probe', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || '探测失败');
+        var lines = (d.results || []).map(function (x) {
+          return (x.status ? String(x.ms) + 'ms' : '超时') + '  HTTP ' + x.status + '  ' + x.name;
+        });
+        box.textContent = '入口机房：' + (d.colo || '未知') + '\n' +
+          lines.join('\n') + '\n\n最快：' + d.winner + '\n' + d.hint;
+      })
+      .catch(function (e) { box.textContent = '探测失败：' + e.message; })
+      .then(function () { btn.textContent = old; btn.disabled = false; });
+  }
+  $('probeBtn').addEventListener('click', function () { probeRoutes(this); });
 
   var links = document.querySelectorAll('.link[data-url]');
   for (var i = 0; i < links.length; i++) {
