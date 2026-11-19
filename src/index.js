@@ -142,25 +142,11 @@ function extractTarget(request) {
   return { target };
 }
 
-/**
- * 代理地址优先取请求的 Host，而不是 url.origin。
- * 自定义域名经 CNAME/内部路由进入 Worker 时，url.origin 可能是 workers.dev，
- * 会导致生成的 Location 跳回 workers.dev。
- */
-function publicBase(request, url) {
-  const host = request.headers.get("host");
-  if (host && !host.toLowerCase().endsWith(".workers.dev")) {
-    return url.protocol + "//" + host;
-  }
-  return url.origin;
-}
-
-/** 重定向使用相对路径，浏览器会按当前访问域名解析，避免跨域跳转 */
-function toProxyPath(absolute) {
+function toProxyUrl(base, absolute) {
   try {
     const u = new URL(absolute);
     if (u.protocol !== "https:" && u.protocol !== "http:") return absolute;
-    return "/" + u.toString();
+    return base + "/" + u.toString();
   } catch (e) {
     return absolute;
   }
@@ -250,12 +236,7 @@ async function buildResponse(upstream, target, base) {
     } catch (e) {
       /* 保留原值 */
     }
-    headers.set("Location", toProxyPath(resolved));
-  }
-
-  // 3xx 里常带签名下载链接（GitHub Release 等），缓存会导致链接过期或跳错域名
-  if (upstream.status >= 300 && upstream.status < 400) {
-    headers.set("Cache-Control", "no-store");
+    headers.set("Location", toProxyUrl(base, resolved));
   }
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
@@ -293,7 +274,7 @@ async function buildResponse(upstream, target, base) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    const base = publicBase(request, url);
+    const base = url.origin;
     const path = url.pathname || "/";
 
     if (request.method === "OPTIONS") {
@@ -336,7 +317,7 @@ export default {
         cacheEverything: true,
         cacheTtlByStatus: {
           "200-299": 86400,
-          "301,302": 0,
+          "301,302": 3600,
           "404": 300,
           "500-599": 0,
         },
