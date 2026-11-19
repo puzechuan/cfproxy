@@ -19,7 +19,7 @@
 const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.5";
+const BUILD_ID = "2026-11-20.6";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -338,62 +338,6 @@ function upstreamRoutes(target, env) {
     routes.push({ name: "www.github.com", url: alternate.toString() });
   }
   return routes;
-}
-
-/** 只探测入口连通性与延迟；结果供 UPSTREAM_MIRRORS 排序参考 */
-async function probeUpstreams(request, env) {
-  const raw = env && env.UPSTREAM_MIRRORS;
-  const probes = [{ name: "direct", url: "https://github.com/" }];
-  if (raw) {
-    try {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        for (const base of parsed) {
-          if (typeof base !== "string" || !/^https:\/\//i.test(base)) continue;
-          const clean = base.replace(/\/+$/, "");
-          probes.push({
-            name: new URL(clean).hostname,
-            url: clean + "/https://github.com/",
-          });
-        }
-      }
-    } catch (e) {
-      /* 配置错误时在 __probe 结果中体现，不影响原有直连 */
-    }
-  }
-
-  const results = await Promise.all(
-    probes.map(async (probe) => {
-      const started = Date.now();
-      let status = 0;
-      try {
-        const response = await fetch(
-          new Request(probe.url, {
-            method: "HEAD",
-            headers: { "user-agent": DEFAULT_UA },
-            cache: "no-store",
-            signal: AbortSignal.timeout(4000),
-          })
-        );
-        status = response.status;
-      } catch (e) {
-        status = 0;
-      }
-      return { name: probe.name, status, ms: Date.now() - started };
-    })
-  );
-  const usable = (x) => x.status >= 200 && x.status < 400;
-  results.sort(
-    (a, b) => (usable(a) ? a.ms : Number.MAX_SAFE_INTEGER) -
-      (usable(b) ? b.ms : Number.MAX_SAFE_INTEGER)
-  );
-  return {
-    ok: true,
-    colo: (request.cf && request.cf.colo) || null,
-    results,
-    winner: results.length && usable(results[0]) ? results[0].name : null,
-    hint: "HEAD 延迟仅供参考；按延迟把优选入口写入 UPSTREAM_MIRRORS（JSON 数组），第一项为首选",
-  };
 }
 
 /* ------------------------------ 内容链接重写 ------------------------------ */
@@ -789,11 +733,6 @@ async function handleRequest(request, env, ctx) {
       logEvent("warm_api_error", { url: safeUrl(target), error: String(e) });
       return json({ ok: false, error: String(e) }, 502);
     }
-  }
-
-  // 回源线路探测：告诉你这个入口机房到各条线路的延迟
-  if (path === "/__probe") {
-    return json(await probeUpstreams(request, env));
   }
 
   if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {

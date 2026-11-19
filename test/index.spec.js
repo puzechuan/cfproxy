@@ -501,27 +501,6 @@ describe("回源线路优选", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});
 
-	it("/__probe 返回官方线路与已配置镜像的延迟", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => new Response(null, { status: 200 }))
-		);
-
-		const response = await callWith(
-			new Request("http://example.com/__probe"),
-			{ UPSTREAM_MIRRORS: JSON.stringify(["https://mirror.example"]) }
-		);
-		expect(response.status).toBe(200);
-		const data = await response.json();
-		expect(data.ok).toBe(true);
-		expect(data.results.length).toBe(2);
-		expect(data.results.map((x) => x.name).sort()).toEqual([
-			"direct",
-			"mirror.example",
-		]);
-		expect(data.winner).toBeTruthy();
-	});
-
 	it("/health 不缓存，便于确认线上版本", async () => {
 		const response = await call(new Request("http://example.com/health"));
 		expect(response.headers.get("cache-control")).toBe("no-store");
