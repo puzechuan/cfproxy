@@ -19,7 +19,7 @@
 const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.4";
+const BUILD_ID = "2026-11-20.5";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -446,12 +446,34 @@ function rewriteHtml(text, base, host) {
   return out;
 }
 
+/** 重写 HTML 会改变内联脚本内容，GitHub CSP 里的 sha256 白名单随之失效。
+ *  必须按改写后的脚本文本重算哈希，否则页面停在骨架屏（React 未 hydrate）。 */
+async function inlineScriptHashes(html) {
+  const hashes = [];
+  const pattern = /<script([^>]*)>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = pattern.exec(html))) {
+    if (/\bsrc\s*=/i.test(match[1])) continue;
+    const body = match[2];
+    if (!body.trim()) continue;
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(body)
+    );
+    const bytes = new Uint8Array(digest);
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    hashes.push("'sha256-" + btoa(binary) + "'");
+  }
+  return hashes;
+}
+
 /**
  * GitHub 的 CSP 只允许 github.githubassets.com 提供样式/脚本/字体，
  * 但页面里的资源 URL 已被重写到代理域名，不改写 CSP 浏览器会全部拦截，
  * 表现为"无样式裸页面"。给每个来源列表追加代理源站。
  */
-function rewriteCsp(value, base) {
+function rewriteCsp(value, base, scriptHashes) {
   if (!value) return value;
   const directives = [
     "default-src", "connect-src", "font-src", "img-src", "style-src",
@@ -462,6 +484,16 @@ function rewriteCsp(value, base) {
   for (const directive of directives) {
     const pattern = new RegExp("(^|;\\s*)(" + directive + ")(\\s+)([^;]*)", "gi");
     out = out.replace(pattern, function (match, lead, name, gap, sources) {
+      if (directive === "script-src" && scriptHashes && scriptHashes.length) {
+        const hosts = sources
+          .replace(/'sha256-[^']+'/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        return (
+          lead + name + gap + (hosts ? hosts + " " : "") +
+          scriptHashes.join(" ") + " " + base
+        );
+      }
       // 'self' 在代理页面里已经指向代理域名，无需重复添加
       if (/(^|\s)'self'(\s|$)/i.test(sources)) return match;
       if (/(^|\s)'none'(\s|$)/i.test(sources)) {
@@ -536,14 +568,6 @@ async function buildResponse(upstream, target, base, options = {}) {
   }
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
-
-  // 资源 URL 已重写到代理域名，CSP 必须同步放行，否则样式/脚本被浏览器拦截
-  if (contentType.includes("text/html")) {
-    const csp = headers.get("content-security-policy");
-    if (csp) headers.set("content-security-policy", rewriteCsp(csp, base));
-    headers.delete("content-security-policy-report-only");
-  }
-
   const shouldRewrite =
     status >= 200 &&
     status < 400 &&
@@ -559,9 +583,22 @@ async function buildResponse(upstream, target, base, options = {}) {
     headers.delete("content-length");
     headers.delete("content-encoding");
     let text = await upstream.text();
-    text = contentType.includes("text/html")
+    const isHtml = contentType.includes("text/html");
+    text = isHtml
       ? rewriteHtml(text, base, target.hostname)
       : rewriteUrls(text, base);
+
+    // 资源 URL 改到代理域名后，CSP 也要放行；内联脚本被改写后旧哈希失效，
+    // 必须按新文本重算，否则 React 等脚本被拦，页面一直显示骨架屏。
+    if (isHtml) {
+      const csp = headers.get("content-security-policy");
+      if (csp) {
+        const hashes = await inlineScriptHashes(text);
+        headers.set("content-security-policy", rewriteCsp(csp, base, hashes));
+      }
+      headers.delete("content-security-policy-report-only");
+    }
+
     return new Response(text, {
       status,
       statusText: upstream.statusText,

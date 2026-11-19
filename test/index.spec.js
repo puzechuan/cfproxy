@@ -528,6 +528,54 @@ describe("回源线路优选", () => {
 	});
 });
 
+describe("内联脚本哈希", () => {
+	it("HTML 改写后重算 CSP 中的 sha256，避免脚本被拦截导致骨架屏", async () => {
+		const oldHash = "'sha256-oldHash='";
+		const html =
+			'<html><head><script>window.x="https://github.com/foo/bar";</script></head><body>x</body></html>';
+		const csp =
+			"default-src 'none'; script-src github.githubassets.com " +
+			oldHash +
+			"; style-src 'unsafe-inline' github.githubassets.com";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response(html, {
+					status: 200,
+					headers: {
+						"Content-Type": "text/html; charset=utf-8",
+						"Content-Security-Policy": csp,
+					},
+				})
+			)
+		);
+
+		const response = await call(
+			new Request("https://example.com/https://github.com/foo/bar", {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+		const finalHtml = await response.text();
+		const scriptBody = finalHtml.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1];
+		const digest = await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(scriptBody)
+		);
+		let binary = "";
+		for (const byte of new Uint8Array(digest)) {
+			binary += String.fromCharCode(byte);
+		}
+		const expected = "sha256-" + btoa(binary);
+		const out = response.headers.get("content-security-policy");
+
+		expect(finalHtml).toContain(
+			"https://cfproxy.koomer.site/https://github.com/foo/bar"
+		);
+		expect(out).not.toContain(oldHash);
+		expect(out).toContain(expected);
+	});
+});
+
 describe("内容链接重写", () => {
 	it("使用请求 Host 作为代理地址", async () => {
 		vi.stubGlobal(
