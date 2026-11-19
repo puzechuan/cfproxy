@@ -19,7 +19,7 @@
 const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.3";
+const BUILD_ID = "2026-11-20.4";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -446,6 +446,33 @@ function rewriteHtml(text, base, host) {
   return out;
 }
 
+/**
+ * GitHub 的 CSP 只允许 github.githubassets.com 提供样式/脚本/字体，
+ * 但页面里的资源 URL 已被重写到代理域名，不改写 CSP 浏览器会全部拦截，
+ * 表现为"无样式裸页面"。给每个来源列表追加代理源站。
+ */
+function rewriteCsp(value, base) {
+  if (!value) return value;
+  const directives = [
+    "default-src", "connect-src", "font-src", "img-src", "style-src",
+    "script-src", "media-src", "object-src", "child-src", "frame-src",
+    "worker-src", "manifest-src", "form-action",
+  ];
+  let out = value;
+  for (const directive of directives) {
+    const pattern = new RegExp("(^|;\\s*)(" + directive + ")(\\s+)([^;]*)", "gi");
+    out = out.replace(pattern, function (match, lead, name, gap, sources) {
+      // 'self' 在代理页面里已经指向代理域名，无需重复添加
+      if (/(^|\s)'self'(\s|$)/i.test(sources)) return match;
+      if (/(^|\s)'none'(\s|$)/i.test(sources)) {
+        return lead + name + gap + base;
+      }
+      return lead + name + gap + sources + " " + base;
+    });
+  }
+  return out;
+}
+
 /* -------------------------------- 请求 / 回包 ------------------------------- */
 
 function upstreamHeaders(request) {
@@ -509,6 +536,14 @@ async function buildResponse(upstream, target, base, options = {}) {
   }
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
+
+  // 资源 URL 已重写到代理域名，CSP 必须同步放行，否则样式/脚本被浏览器拦截
+  if (contentType.includes("text/html")) {
+    const csp = headers.get("content-security-policy");
+    if (csp) headers.set("content-security-policy", rewriteCsp(csp, base));
+    headers.delete("content-security-policy-report-only");
+  }
+
   const shouldRewrite =
     status >= 200 &&
     status < 400 &&

@@ -401,6 +401,47 @@ describe("显式预热接口", () => {
 	});
 });
 
+describe("CSP 重写", () => {
+	it("HTML 页面的 CSP 放行代理域名，避免样式和脚本被拦截", async () => {
+		const csp =
+			"default-src 'none'; base-uri 'self'; " +
+			"style-src 'unsafe-inline' github.githubassets.com; " +
+			"script-src github.githubassets.com 'sha256-abc'; " +
+			"font-src github.githubassets.com; img-src 'self' data:";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response("<html><head></head><body>hi</body></html>", {
+					status: 200,
+					headers: {
+						"Content-Type": "text/html; charset=utf-8",
+						"Content-Security-Policy": csp,
+						"Content-Security-Policy-Report-Only": "script-src 'none'",
+					},
+				})
+			)
+		);
+
+		const response = await call(
+			new Request("https://example.com/https://github.com/foo/bar", {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+		const out = response.headers.get("content-security-policy");
+		expect(out).toContain(
+			"style-src 'unsafe-inline' github.githubassets.com https://cfproxy.koomer.site"
+		);
+		expect(out).toContain(
+			"font-src github.githubassets.com https://cfproxy.koomer.site"
+		);
+		expect(out).toContain(
+			"script-src github.githubassets.com 'sha256-abc' https://cfproxy.koomer.site"
+		);
+		expect(out).toContain("base-uri 'self'");
+		expect(response.headers.get("content-security-policy-report-only")).toBeNull();
+	});
+});
+
 describe("回源线路优选", () => {
 	const assetUrl = "https://github.com/foo/bar/releases/download/v1/tool.tar.gz";
 
