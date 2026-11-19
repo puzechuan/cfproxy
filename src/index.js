@@ -6,16 +6,20 @@
  *
  * 设计要点：
  * 1. 普通页面：手动处理重定向并重写 Location，保证链接不跳出代理域名。
- * 2. 下载资源（Release / codeload / 对象存储）：Worker 内部跟随重定向，
- *    浏览器始终只看到干净的原始代理链接，少一次完整往返。
+ * 2. 下载资源（Release / latest / codeload / 对象存储）：Worker 内部跟随重定向，
+ *    浏览器始终只看到干净的原始代理链接，绝不暴露带签名的临时 URL。
  * 3. 下载资源使用稳定 cacheKey（剥离每次都变的签名查询串），
  *    边缘缓存可以真正命中，重复下载由 CF 边缘直接返回。
- * 4. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
- * 5. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
+ * 4. 成功的下载响应允许浏览器缓存，二次下载连 Worker 都不经过。
+ * 5. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
+ * 6. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
  */
 
 // 静态页面在构建时由 index.html 注入；本地直接运行时为空串，请以部署版本为准
 const UI_HTML = "__UI_HTML__";
+
+// 用于线上确认部署版本（/health 中返回）
+const BUILD_ID = "2026-11-19.2";
 
 // 允许代理的源站，防止被当作开放代理滥用
 const ALLOWED_HOSTS = new Set([
@@ -32,6 +36,8 @@ const ALLOWED_HOSTS = new Set([
   "user-images.githubusercontent.com",
   "github.io",
   "release-assets.githubusercontent.com",
+  "github-releases.githubusercontent.com",
+  "assets.githubusercontent.com",
 ]);
 const HOST_LIST = Array.from(ALLOWED_HOSTS).sort((a, b) => b.length - a.length);
 
@@ -67,14 +73,19 @@ const CACHEABLE_HOSTS = new Set([
   "objects.githubusercontent.com",
   "user-images.githubusercontent.com",
   "githubusercontent.com",
+  "assets.githubusercontent.com",
+  "github-releases.githubusercontent.com",
 ]);
 
 const ASSET_HOSTS = new Set([
   "codeload.github.com",
   "objects.githubusercontent.com",
   "release-assets.githubusercontent.com",
+  "github-releases.githubusercontent.com",
+  "assets.githubusercontent.com",
 ]);
-const RELEASE_DOWNLOAD = /\/releases\/download\//i;
+// /releases/download/<tag>/<file> 之外，/releases/latest/download/<file> 也会 302 到签名地址
+const RELEASE_DOWNLOAD = /\/releases\/(?:latest\/)?download\//i;
 
 /* ---------------------------------- 工具 ---------------------------------- */
 
@@ -214,8 +225,11 @@ function isDownloadAsset(target) {
  */
 function assetCacheKey(target) {
   const host = target.hostname.toLowerCase();
+  // 这些对象的查询串是一次性签名，参与键会让缓存永远 MISS
   if (host === "release-assets.githubusercontent.com" ||
-      host === "objects.githubusercontent.com") {
+      host === "github-releases.githubusercontent.com" ||
+      host === "objects.githubusercontent.com" ||
+      host === "assets.githubusercontent.com") {
     return "cfproxy:asset:" + host + target.pathname;
   }
   return "cfproxy:asset:" + host + target.pathname + target.search;
@@ -288,7 +302,7 @@ function isCacheable(target) {
   return false;
 }
 
-async function buildResponse(upstream, target, base) {
+async function buildResponse(upstream, target, base, options = {}) {
   const headers = new Headers();
   for (const [key, value] of upstream.headers.entries()) {
     if (!RESP_SKIP.has(key.toLowerCase())) headers.set(key, value);
@@ -296,8 +310,14 @@ async function buildResponse(upstream, target, base) {
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Expose-Headers", "*");
 
-  // 浏览器不缓存代理响应；边缘缓存由 fetch 的 cf.cacheTtlByStatus 控制，不受影响。
-  headers.set("Cache-Control", "no-store");
+  // Release 资产内容不可变，允许浏览器缓存一天：二次下载连 Worker 都不经过。
+  // 重定向与文本页面仍禁止缓存，避免旧签名链接残留在浏览器缓存里。
+  const cacheableAsset =
+    options.asset && upstream.status >= 200 && upstream.status < 300;
+  headers.set(
+    "Cache-Control",
+    cacheableAsset ? "public, max-age=86400" : "no-store"
+  );
 
   // 重定向地址必须指回代理，否则浏览器会直连 GitHub
   const location = upstream.headers.get("location");
@@ -355,11 +375,24 @@ const CACHE_TTL = {
  * 在后台拉取完整对象（按块丢弃，不占用内存），把完整文件写进边缘缓存，
  * 之后任意区间都能命中。失败不影响已返回给客户端的响应。
  */
-async function warmFullAsset(target, headers, cacheCf) {
-  const warmHeaders = new Headers(headers);
-  warmHeaders.delete("range");
-  warmHeaders.delete("if-range");
+const inFlightWarms = new Set();
+
+async function warmFullAsset(target, headers, cacheCf, key) {
+  // 多线程下载器会并发发来多个 Range MISS。若每个都触发一次完整回源，
+  // 重复流量会把带宽吃光，反而比不预热更慢。同一对象只预热一次。
+  if (inFlightWarms.has(key)) {
+    logEvent("warm_skip", { url: safeUrl(target), reason: "in_flight" });
+    return;
+  }
+  inFlightWarms.add(key);
   try {
+    const warmHeaders = new Headers(headers);
+    for (const name of [
+      "range", "if-range", "if-none-match", "if-match",
+      "if-modified-since", "if-unmodified-since", "cache-control", "pragma",
+    ]) {
+      warmHeaders.delete(name);
+    }
     const upstream = await fetch(
       new Request(target.toString(), {
         method: "GET",
@@ -383,6 +416,8 @@ async function warmFullAsset(target, headers, cacheCf) {
     }
   } catch (e) {
     logEvent("warm_error", { url: safeUrl(target), error: String(e) });
+  } finally {
+    inFlightWarms.delete(key);
   }
 }
 
@@ -398,7 +433,12 @@ async function handleRequest(request, env, ctx) {
     return new Response(null, { status: 204, headers: corsHeaders() });
   }
   if (path === "/health") {
-    return json({ ok: true, service: "cfproxy", time: new Date().toISOString() });
+    return json({
+      ok: true,
+      service: "cfproxy",
+      build: BUILD_ID,
+      time: new Date().toISOString(),
+    });
   }
   if (path === "/favicon.ico") {
     return new Response(null, { status: 204 });
@@ -491,11 +531,11 @@ async function handleRequest(request, env, ctx) {
   if (asset && method === "GET" && request.headers.has("range")) {
     const cacheStatus = upstream.headers.get("cf-cache-status") || "";
     if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
-      ctx.waitUntil(warmFullAsset(target, headers, assetCacheCf));
+      ctx.waitUntil(warmFullAsset(target, headers, assetCacheCf, cacheKey));
     }
   }
 
-  const response = await buildResponse(upstream, target, base);
+  const response = await buildResponse(upstream, target, base, { asset });
   logEvent("respond", {
     url: safeUrl(target),
     status: response.status,

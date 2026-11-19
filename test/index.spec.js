@@ -93,6 +93,89 @@ describe("重定向处理", () => {
 	});
 });
 
+describe("下载加速与缓存", () => {
+	it("latest/download 也由服务端跟随，浏览器看不到签名链接且可缓存", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response("binary", {
+				status: 200,
+				headers: { "Content-Type": "application/octet-stream", "Content-Length": "6" },
+			})
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.com/OpenListTeam/OpenList/releases/latest/download/tool.tar.gz",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(200);
+		expect(response.headers.get("location")).toBeNull();
+		expect(response.headers.get("cache-control")).toBe("public, max-age=86400");
+		expect(fetchMock.mock.calls[0][0].redirect).toBe("follow");
+	});
+
+	it("直接访问签名资源链接时使用剥离查询串的稳定缓存键", async () => {
+		const fetchMock = vi.fn(async () => new Response("binary", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await call(
+			new Request(
+				"http://example.com/https://release-assets.githubusercontent.com/github-production-release-asset/123/tool.tar.gz?sig=abc&jwt=def",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(fetchMock.mock.calls[0][0].cf.cacheKey).toBe(
+			"cfproxy:asset:release-assets.githubusercontent.com/github-production-release-asset/123/tool.tar.gz"
+		);
+	});
+
+	it("并发 Range 未命中只预热一次完整对象，且预热不带条件请求头", async () => {
+		const fetchMock = vi.fn((req) => {
+			const isRange = req.headers.has("range");
+			const response = new Response(isRange ? "0123456789" : "full-object", {
+				status: isRange ? 206 : 200,
+				headers: isRange
+					? { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }
+					: { "Content-Length": "11", "Accept-Ranges": "bytes" },
+			});
+			// 让预热保持 pending，确保并发请求能命中"正在预热"状态
+			return isRange
+				? Promise.resolve(response)
+				: new Promise((resolve) => setTimeout(() => resolve(response), 40));
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const make = () =>
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
+				{
+					headers: {
+						Host: "cfproxy.koomer.site",
+						Range: "bytes=0-9",
+						"If-None-Match": "etag-1",
+					},
+				}
+			);
+
+		const ctx1 = createExecutionContext();
+		const ctx2 = createExecutionContext();
+		await Promise.all([
+			worker.fetch(make(), env, ctx1),
+			worker.fetch(make(), env, ctx2),
+		]);
+		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
+
+		// 两次 Range 请求 + 一次完整预热，而不是两次完整预热
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+		const warm = fetchMock.mock.calls.find(([req]) => !req.headers.has("range"));
+		expect(warm).toBeDefined();
+		expect(warm[0].headers.has("if-none-match")).toBe(false);
+	});
+});
+
 describe("内容链接重写", () => {
 	it("使用请求 Host 作为代理地址", async () => {
 		vi.stubGlobal(
