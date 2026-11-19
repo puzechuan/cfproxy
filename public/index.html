@@ -121,7 +121,7 @@
         <button id="convertBtn">生成加速链接</button>
       </div>
       <div class="result" id="resultBox" hidden>
-        <label for="result">加速后的链接</label>
+        <label for="result">加速后的链接（首次下载建议先点「预热缓存」）</label>
         <div class="row">
           <input type="text" id="result" readonly>
           <button class="ghost" id="copyBtn">复制</button>
@@ -160,12 +160,15 @@
   var sourceInput = $('source');
   var resultBox = $('resultBox');
   var msg = $('msg');
+  var currentTarget = null;
 
   var ALLOWED = [
     'github.com', 'www.github.com', 'raw.githubusercontent.com', 'api.github.com',
-    'codeload.github.com', 'objects.githubusercontent.com', 'avatars.githubusercontent.com',
-    'gist.github.com', 'gist.githubusercontent.com', 'githubusercontent.com',
-    'user-images.githubusercontent.com', 'github.io',
+    'codeload.github.com', 'objects.githubusercontent.com', 'objects-origin.githubusercontent.com',
+    'avatars.githubusercontent.com', 'gist.github.com', 'gist.githubusercontent.com',
+    'githubusercontent.com', 'user-images.githubusercontent.com', 'camo.githubusercontent.com',
+    'private-user-images.githubusercontent.com', 'secured-user-images.githubusercontent.com',
+    'github.githubassets.com', 'github.io',
     'release-assets.githubusercontent.com', 'github-releases.githubusercontent.com',
     'assets.githubusercontent.com'
   ];
@@ -213,7 +216,8 @@
     var n = normalize(sourceInput.value);
     if (!b) return setMsg('请先填写代理服务地址', true);
     if (!n) return setMsg('请输入有效的 GitHub 链接（或 user/repo）', true);
-    $('result').value = b + '/https://' + n.host + n.path;
+    currentTarget = 'https://' + n.host + n.path;
+    $('result').value = b + '/' + currentTarget;
 
     var cloneUrl;
     var seg = n.path.replace(/^\//, '').split('/').filter(Boolean);
@@ -250,23 +254,37 @@
       var u = new URL(url);
       var host = u.hostname.toLowerCase();
       if (host === 'codeload.github.com' || host === 'objects.githubusercontent.com' ||
+          host === 'objects-origin.githubusercontent.com' ||
           host === 'release-assets.githubusercontent.com' ||
-          host === 'github-releases.githubusercontent.com') return true;
+          host === 'github-releases.githubusercontent.com' ||
+          host === 'assets.githubusercontent.com') return true;
       return /\/releases\/(?:latest\/)?download\//i.test(u.pathname) ||
              /\.(zip|tar|gz|bz2|xz|7z|dmg|exe|deb|rpm|whl|pdf)$/i.test(u.pathname);
     } catch (e) { return false; }
   }
 
   function warmCache(btn) {
-    var url = $('result').value;
-    if (!url) return setMsg('请先生成加速链接', true);
-    if (!isDownload(url)) return setMsg('该链接不是下载资源，无需预热', true);
+    var target = currentTarget;
+    if (!target) return setMsg('请先生成加速链接', true);
+    if (!isDownload(target)) return setMsg('该链接不是下载资源，无需预热', true);
     var old = btn.textContent;
     btn.textContent = '预热中…';
     btn.disabled = true;
-    fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' })
-      .then(function () { setMsg('已触发预热：正在写入边缘缓存，稍后下载会更快'); })
-      .catch(function () { setMsg('预热请求失败，可直接下载', true); })
+    // 走专用接口：整份文件写入边缘缓存后才返回，避免"刚预热就下载"仍然 MISS
+    var endpoint = base() + '/__warm?url=' + encodeURIComponent(target);
+    fetch(endpoint, { cache: 'no-store' })
+      .then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, data: d }; });
+      })
+      .then(function (out) {
+        if (!out.ok || !out.data.ok) throw new Error(out.data.error || '预热失败');
+        var mb = (out.data.bytes / 1048576).toFixed(1);
+        var hit = out.data.cache === 'HIT' ? '（边缘缓存 HIT）' : '';
+        setMsg('预热完成：' + mb + ' MB' + hit + '，现在下载会优先命中边缘缓存');
+      })
+      .catch(function (e) {
+        setMsg('预热未完成（' + e.message + '），仍可直接下载', true);
+      })
       .then(function () { btn.textContent = old; btn.disabled = false; });
   }
 

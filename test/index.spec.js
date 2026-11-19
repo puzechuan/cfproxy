@@ -246,6 +246,161 @@ describe("异常上游与过期签名", () => {
 	});
 });
 
+describe("GitHub 静态资源代理", () => {
+	it("github.githubassets.com 走代理并启用缓存", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response("body", {
+				status: 200,
+				headers: { "Content-Type": "application/javascript", "Content-Length": "4" },
+			})
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.githubassets.com/assets/app.js",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(200);
+		const sub = fetchMock.mock.calls[0][0];
+		expect(sub.url).toBe("https://github.githubassets.com/assets/app.js");
+		expect(sub.cf.cacheEverything).toBe(true);
+	});
+
+	it("CSS 里的绝对 URL 也会被重写", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response('body{background:url(https://github.githubassets.com/img/bg.png)}', {
+					status: 200,
+					headers: { "Content-Type": "text/css; charset=utf-8" },
+				})
+			)
+		);
+
+		const response = await call(
+			new Request(
+				"https://example.com/https://github.githubassets.com/assets/app.css",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+		expect(await response.text()).toContain(
+			"https://cfproxy.koomer.site/https://github.githubassets.com/img/bg.png"
+		);
+	});
+
+	it("支持 *.github.io 子域（与首页白名单一致）", async () => {
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request("http://example.com/https://foo.github.io/index.html", {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+		expect(response.status).toBe(200);
+		expect(fetchMock.mock.calls[0][0]).toBe("https://foo.github.io/index.html");
+	});
+
+	it("响应头暴露边缘缓存命中状态", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				new Response("x", {
+					status: 200,
+					headers: { "CF-Cache-Status": "HIT", Age: "12" },
+				})
+			)
+		);
+
+		const response = await call(
+			new Request("http://example.com/https://raw.githubusercontent.com/a/b/main/x", {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+		expect(response.headers.get("x-cfproxy-cache")).toBe("HIT");
+		expect(response.headers.get("age")).toBeNull();
+	});
+});
+
+describe("显式预热接口", () => {
+	const target = "https://github.com/foo/bar/releases/download/v1/tool.tar.gz";
+
+	function stubFetch() {
+		const fetchMock = vi.fn(async (req) => {
+			if (typeof req !== "string" && req.headers.has("range")) {
+				return new Response(null, {
+					status: 206,
+					headers: { "CF-Cache-Status": "HIT" },
+				});
+			}
+			return new Response("binary", {
+				status: 200,
+				headers: { "Content-Length": "6" },
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		return fetchMock;
+	}
+
+	it("/__warm 等完整对象下载完成后返回字节数与缓存状态", async () => {
+		const fetchMock = stubFetch();
+		const response = await call(
+			new Request(
+				"http://example.com/__warm?url=" + encodeURIComponent(target),
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.status).toBe(200);
+		const data = await response.json();
+		expect(data.ok).toBe(true);
+		expect(data.bytes).toBe(6);
+		expect(data.cache).toBe("HIT");
+
+		const warm = fetchMock.mock.calls.find(
+			([req]) => typeof req !== "string" && !req.headers.has("range")
+		);
+		expect(warm[0].cf.cacheEverything).toBe(true);
+		expect(warm[0].cf.cacheKey).toBe("cfproxy:asset:github.com/foo/bar/releases/download/v1/tool.tar.gz");
+	});
+
+	it("并发预热同一对象只回源一次", async () => {
+		const fetchMock = stubFetch();
+		const make = () =>
+			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
+				headers: { Host: "cfproxy.koomer.site" },
+			});
+		const ctx1 = createExecutionContext();
+		const ctx2 = createExecutionContext();
+		const [r1, r2] = await Promise.all([
+			worker.fetch(make(), env, ctx1),
+			worker.fetch(make(), env, ctx2),
+		]);
+		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
+
+		expect((await r1.json()).ok).toBe(true);
+		expect((await r2.json()).ok).toBe(true);
+		// 1 次完整预热 + 2 次 1 字节验证
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("非下载资源拒绝预热", async () => {
+		stubFetch();
+		const response = await call(
+			new Request(
+				"http://example.com/__warm?url=" +
+					encodeURIComponent("https://github.com/foo/bar"),
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+		expect(response.status).toBe(400);
+		expect((await response.json()).ok).toBe(false);
+	});
+});
+
 describe("内容链接重写", () => {
 	it("使用请求 Host 作为代理地址", async () => {
 		vi.stubGlobal(

@@ -19,9 +19,11 @@
 const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-19.2";
+const BUILD_ID = "2026-11-20.1";
 
 // 允许代理的源站，防止被当作开放代理滥用
+// github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
+// 否则页面资源仍直连 GitHub CDN，"加速"体感会大幅打折。
 const ALLOWED_HOSTS = new Set([
   "github.com",
   "www.github.com",
@@ -29,11 +31,16 @@ const ALLOWED_HOSTS = new Set([
   "api.github.com",
   "codeload.github.com",
   "objects.githubusercontent.com",
+  "objects-origin.githubusercontent.com",
   "avatars.githubusercontent.com",
   "gist.github.com",
   "gist.githubusercontent.com",
   "githubusercontent.com",
   "user-images.githubusercontent.com",
+  "camo.githubusercontent.com",
+  "private-user-images.githubusercontent.com",
+  "secured-user-images.githubusercontent.com",
+  "github.githubassets.com",
   "github.io",
   "release-assets.githubusercontent.com",
   "github-releases.githubusercontent.com",
@@ -59,7 +66,7 @@ const REQ_SKIP = new Set([
 // content-length / content-encoding 对二进制透传是有意义的，只在文本改写时删除。
 const RESP_SKIP = new Set([
   "set-cookie", "transfer-encoding", "connection", "keep-alive",
-  "upgrade", "cf-ray",
+  "upgrade", "cf-ray", "age",
 ]);
 
 const STATIC_EXT =
@@ -71,7 +78,12 @@ const CACHEABLE_HOSTS = new Set([
   "gist.githubusercontent.com",
   "codeload.github.com",
   "objects.githubusercontent.com",
+  "objects-origin.githubusercontent.com",
   "user-images.githubusercontent.com",
+  "camo.githubusercontent.com",
+  "private-user-images.githubusercontent.com",
+  "secured-user-images.githubusercontent.com",
+  "github.githubassets.com",
   "githubusercontent.com",
   "assets.githubusercontent.com",
   "github-releases.githubusercontent.com",
@@ -173,20 +185,24 @@ function safeUrl(target) {
 
 /* ------------------------------ 目标 URL 解析 ------------------------------ */
 
-function extractTarget(request) {
+function extractTarget(request, forcedRaw) {
   const url = new URL(request.url);
   let raw = "";
   const path = url.pathname || "/";
 
-  if (path !== "/") {
-    try {
-      raw = decodeURIComponent(path.replace(/^\/+/, ""));
-    } catch (e) {
-      return { error: "路径解码失败" };
+  if (forcedRaw !== undefined) {
+    raw = forcedRaw;
+  } else {
+    if (path !== "/") {
+      try {
+        raw = decodeURIComponent(path.replace(/^\/+/, ""));
+      } catch (e) {
+        return { error: "路径解码失败" };
+      }
     }
-  }
-  if (!raw && url.searchParams.has("url")) {
-    raw = url.searchParams.get("url");
+    if (!raw && url.searchParams.has("url")) {
+      raw = url.searchParams.get("url");
+    }
   }
   if (!raw) return null; // 根路径：交给静态页面
 
@@ -201,12 +217,21 @@ function extractTarget(request) {
   if (target.protocol !== "https:" && target.protocol !== "http:") {
     return { error: "仅支持 http/https 协议" };
   }
-  if (!ALLOWED_HOSTS.has(target.hostname)) {
-    return { error: "域名不在白名单中：" + target.hostname };
+  const hostname = target.hostname.toLowerCase();
+  // 前端允许任意 *.github.io，服务端需保持一致，否则生成的链接会被自己拒绝
+  if (!ALLOWED_HOSTS.has(hostname) && !hostname.endsWith(".github.io")) {
+    return { error: "域名不在白名单中：" + hostname };
   }
+  target.hostname = hostname;
 
-  // 形如 /https://github.com/x?tab=readme 的查询串应透传给源站
-  if (!target.search && url.search && !url.searchParams.has("url")) {
+  // 形如 /https://github.com/x?tab=readme 的查询串应透传给源站。
+  // /__warm?url=... 的查询串是接口参数，不能透传。
+  if (
+    forcedRaw === undefined &&
+    !target.search &&
+    url.search &&
+    !url.searchParams.has("url")
+  ) {
     target.search = url.search;
   }
   return { target };
@@ -356,6 +381,11 @@ async function buildResponse(upstream, target, base, options = {}) {
   }
   headers.set("Access-Control-Allow-Origin", "*");
   headers.set("Access-Control-Expose-Headers", "*");
+  // 暴露给客户端，便于判断"慢"到底是回源还是链路问题
+  headers.set(
+    "X-CFProxy-Cache",
+    upstream.headers.get("cf-cache-status") || "BYPASS"
+  );
 
   // Release 资产内容不可变，允许浏览器缓存一天：二次下载连 Worker 都不经过。
   // 重定向与文本页面仍禁止缓存，避免旧签名链接残留在浏览器缓存里。
@@ -383,6 +413,7 @@ async function buildResponse(upstream, target, base, options = {}) {
     status < 400 &&
     upstream.body &&
     (contentType.includes("text/html") ||
+      contentType.includes("text/css") ||
       contentType.includes("json") ||
       contentType.includes("javascript") ||
       contentType.includes("ecmascript"));
@@ -415,30 +446,32 @@ const CACHE_TTL = {
   "404": 300,
   "500-599": -1,
 };
+const ASSET_CACHE_CF = {
+  cacheEverything: true,
+  cacheTtlByStatus: CACHE_TTL,
+};
 
 /**
- * Range 请求只会让边缘缓存记住这一段，不同区间依然回源。
- * 在后台拉取完整对象（按块丢弃，不占用内存），把完整文件写进边缘缓存，
- * 之后任意区间都能命中。失败不影响已返回给客户端的响应。
+ * 预热：在后台完整拉取对象（按块丢弃，不占用内存），把整份文件写进边缘缓存。
+ * 之后任意 Range 区间都能命中，避免"每个区间各回源一次"。
+ * 以 cacheKey 为单位做并发去重：多线程下载器同时 MISS 时只回源一次。
  */
-const inFlightWarms = new Set();
+const inFlightWarms = new Map();
 
-async function warmFullAsset(target, headers, cacheCf, key) {
-  // 多线程下载器会并发发来多个 Range MISS。若每个都触发一次完整回源，
-  // 重复流量会把带宽吃光，反而比不预热更慢。同一对象只预热一次。
-  if (inFlightWarms.has(key)) {
+function warmAsset(target, cacheCf) {
+  const key = cacheCf.cacheKey;
+  const existing = inFlightWarms.get(key);
+  if (existing) {
     logEvent("warm_skip", { url: safeUrl(target), reason: "in_flight" });
-    return;
+    return existing;
   }
-  inFlightWarms.add(key);
-  try {
-    const warmHeaders = new Headers(headers);
-    for (const name of [
-      "range", "if-range", "if-none-match", "if-match",
-      "if-modified-since", "if-unmodified-since", "cache-control", "pragma",
-    ]) {
-      warmHeaders.delete(name);
-    }
+
+  const started = Date.now();
+  const task = (async () => {
+    const warmHeaders = new Headers({
+      "user-agent": DEFAULT_UA,
+      accept: "application/octet-stream,application/zip,*/*",
+    });
     const upstream = await fetch(
       new Request(target.toString(), {
         method: "GET",
@@ -447,23 +480,55 @@ async function warmFullAsset(target, headers, cacheCf, key) {
         cf: cacheCf,
       })
     );
-    logEvent("warm", {
-      url: safeUrl(target),
-      status: upstream.status,
-      cache: upstream.headers.get("cf-cache-status"),
-      length: upstream.headers.get("content-length"),
-    });
+    const status = normalizeStatus(upstream.status);
+    let bytes = 0;
     if (upstream.body) {
       const reader = upstream.body.getReader();
-      while (true) {
-        const { done } = await reader.read();
+      for (;;) {
+        const { done, value } = await reader.read();
         if (done) break;
+        bytes += value.byteLength;
       }
     }
+    const result = {
+      status,
+      bytes,
+      length: upstream.headers.get("content-length"),
+      ms: Date.now() - started,
+    };
+    logEvent("warm", {
+      url: safeUrl(target),
+      status,
+      bytes,
+      cache: upstream.headers.get("cf-cache-status"),
+    });
+    return result;
+  })();
+
+  inFlightWarms.set(key, task);
+  // 任务结束后立即从去重表移除；调用方自己负责捕获后台任务的错误。
+  task.then(
+    () => inFlightWarms.delete(key),
+    () => inFlightWarms.delete(key)
+  );
+  return task;
+}
+
+/** 预热完成后再发一个 1 字节 Range 请求，确认边缘缓存真的可命中 */
+async function warmCacheStatus(target, cacheCf) {
+  try {
+    const verify = await fetch(
+      new Request(target.toString(), {
+        method: "GET",
+        headers: { Range: "bytes=0-0", "user-agent": DEFAULT_UA },
+        cf: cacheCf,
+      })
+    );
+    const status = verify.headers.get("cf-cache-status") || "BYPASS";
+    if (verify.body) await verify.body.cancel();
+    return /HIT|STALE|REVALIDATED/i.test(status) ? "HIT" : status;
   } catch (e) {
-    logEvent("warm_error", { url: safeUrl(target), error: String(e) });
-  } finally {
-    inFlightWarms.delete(key);
+    return "UNKNOWN";
   }
 }
 
@@ -489,6 +554,52 @@ async function handleRequest(request, env, ctx) {
   if (path === "/favicon.ico") {
     return new Response(null, { status: 204 });
   }
+
+  // 显式预热接口：等整份文件写完边缘缓存才返回，页面可据此提示用户再下载。
+  // 用法：/__warm?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Freleases%2Fdownload%2F...
+  if (path === "/__warm") {
+    const probe = extractTarget(request, url.searchParams.get("url") || "");
+    if (!probe || probe.error) {
+      return json(
+        { ok: false, error: probe ? probe.error : "缺少 url 参数" },
+        400
+      );
+    }
+    const target = probe.target;
+    if (!isDownloadAsset(target)) {
+      return json({ ok: false, error: "该链接不是可缓存的下载资源" }, 400);
+    }
+    const cacheCf = Object.assign(
+      { cacheKey: assetCacheKey(target) },
+      ASSET_CACHE_CF
+    );
+    try {
+      const result = await warmAsset(target, cacheCf);
+      let cache = await warmCacheStatus(target, cacheCf);
+      // 任意播可能把两次请求落到不同机房，MISS 时再确认一次
+      if (cache === "MISS" || cache === "BYPASS") {
+        cache = await warmCacheStatus(target, cacheCf);
+      }
+      logEvent("warm_api", {
+        url: safeUrl(target),
+        bytes: result.bytes,
+        cache,
+        ms: Date.now() - started,
+      });
+      return json({
+        ok: true,
+        url: safeUrl(target),
+        status: result.status,
+        bytes: result.bytes,
+        cache,
+        ms: result.ms,
+      });
+    } catch (e) {
+      logEvent("warm_api_error", { url: safeUrl(target), error: String(e) });
+      return json({ ok: false, error: String(e) }, 502);
+    }
+  }
+
   if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
     return uiResponse();
   }
@@ -523,11 +634,7 @@ async function handleRequest(request, env, ctx) {
 
   const headers = upstreamHeaders(request);
   const assetCacheCf = asset
-    ? {
-        cacheKey,
-        cacheEverything: true,
-        cacheTtlByStatus: Object.assign({}, CACHE_TTL, { "301,302": 0 }),
-      }
+    ? Object.assign({ cacheKey }, ASSET_CACHE_CF)
     : null;
   let upstream;
   try {
@@ -589,7 +696,9 @@ async function handleRequest(request, env, ctx) {
   if (asset && method === "GET" && request.headers.has("range")) {
     const cacheStatus = upstream.headers.get("cf-cache-status") || "";
     if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
-      ctx.waitUntil(warmFullAsset(target, headers, assetCacheCf, cacheKey));
+      ctx.waitUntil(warmAsset(target, assetCacheCf).catch((e) => {
+        logEvent("warm_error", { url: safeUrl(target), error: String(e) });
+      }));
     }
   }
 
