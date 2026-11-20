@@ -364,6 +364,46 @@ describe("下载加速与缓存", () => {
 	});
 
 
+	it("分段请求不交给边缘缓存，避免被折叠成整份 200 让下载器从头重下", async () => {
+		const fetchMock = vi.fn(async () =>
+			new Response("0123456789", {
+				status: 206,
+				headers: { "Content-Range": "bytes 0-9/100", "Content-Length": "10" },
+			})
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
+				{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
+			)
+		);
+
+		const subRequest = fetchMock.mock.calls[0][0];
+		// 关键：没有 cf 参数，CF 不会为了填缓存而无视 Range 整份回源
+		expect(subRequest.cf).toBeUndefined();
+		expect(subRequest.headers.get("accept-encoding")).toBe("identity");
+		expect(response.status).toBe(206);
+		expect(response.headers.get("x-cfproxy-mode")).toBe("range-passthrough");
+	});
+
+	it("不带 Range 的整份 GET 仍然走边缘缓存", async () => {
+		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(fetchMock.mock.calls[0][0].cf.cacheEverything).toBe(true);
+		expect(response.headers.get("x-cfproxy-mode")).toBe("edge-cache");
+	});
+
+
 	it("直接访问签名资源链接时使用剥离查询串的稳定缓存键", async () => {
 		const fetchMock = vi.fn(async () => new Response("binary", { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);

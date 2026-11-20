@@ -10,6 +10,8 @@
  *    浏览器始终只看到干净的原始代理链接，绝不暴露带签名的临时 URL。
  * 3. 下载资源使用稳定 cacheKey（剥离每次都变的签名查询串），
  *    边缘缓存可以真正命中，重复下载由 CF 边缘直接返回。
+ *    但带 Range 的请求（多线程分段 / 断点续传 / 播放器跳转）一律纯透传、不进缓存，
+ *    否则 CF 为填缓存会无视 Range 整份回源，客户端拿到 200 整份文件从头重下。
  * 4. 成功的下载响应允许浏览器缓存，二次下载连 Worker 都不经过。
  * 5. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
  * 6. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
@@ -27,7 +29,7 @@ import {
 // 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.16";
+const BUILD_ID = "2026-11-20.19";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -915,19 +917,32 @@ async function handleRequest(request, env, ctx) {
   const asset = isRead && isDownloadAsset(target);
   const cacheKey = asset ? assetCacheKey(target) : null;
 
+  /**
+   * 带 Range 的请求：下载器多线程分段、播放器拖进度、浏览器断点续传都会用。
+   * 这类请求一律不走边缘缓存（不传 cf 参数，纯透传）：
+   * cacheEverything 打开时，CF 为了让对象能被缓存，会忽略 Range 整份回源，
+   * 于是客户端拿到 200 + 完整 Content-Length（没有 Content-Range）。
+   * 多线程下载器里这个线程就从字节 0 开始下整个文件，重复流量挤占同一条链路，
+   * 每个线程的速度被摊薄到几十 KB/s —— 表现就是"下到一半突然掉速"。
+   * 纯透传保证每个分段稳定返回 206，代价是分段请求不能顺带填缓存
+   * （需要缓存就用整份 GET 或显式 /__warm）。
+   */
+  const rangeHeader = isRead ? request.headers.get("range") : null;
+  const ranged = !!rangeHeader;
+
   logEvent("request", {
     method,
     url: safeUrl(target),
     asset,
     colo: request.cf && request.cf.colo,
     country: request.cf && request.cf.country,
-    range: isRead ? request.headers.get("range") : null,
+    range: rangeHeader,
   });
 
   // 回源前的耗时（鉴权查库 + 参数解析）与回源耗时分开记，便于定位瓶颈
   const fetchStart = Date.now();
   const headers = upstreamHeaders(request);
-  const cacheCf = asset ? assetCacheCf(target, cacheKey) : null;
+  const cacheCf = asset && !ranged ? assetCacheCf(target, cacheKey) : null;
   let upstream;
   let route = "direct";
   try {
@@ -941,13 +956,17 @@ async function handleRequest(request, env, ctx) {
         const candidate = routes[i];
         const routeHeaders = new Headers(headers);
         if (candidate.name !== "direct") routeHeaders.delete("authorization");
+        // 分段请求强制不压缩：源站一旦套上 gzip/br，返回的字节区间就和
+        // Content-Range 描述的原始偏移对不上，拼出来的文件是坏的。
+        if (ranged) routeHeaders.set("accept-encoding", "identity");
         try {
-          const subRequest = new Request(candidate.url, {
+          const init = {
             method,
             headers: routeHeaders,
             redirect: "follow",
-            cf: cacheCf,
-          });
+          };
+          if (cacheCf) init.cf = cacheCf;
+          const subRequest = new Request(candidate.url, init);
           const result = await fetch(subRequest);
           const status = normalizeStatus(result.status);
           if (status >= 500 && i < routes.length - 1) {
@@ -982,7 +1001,7 @@ async function handleRequest(request, env, ctx) {
         init.body = request.body;
         init.duplex = "half";
       }
-      if (isRead && isCacheable(target)) {
+      if (isRead && !ranged && isCacheable(target)) {
         init.cf = { cacheEverything: true, cacheTtlByStatus: CACHE_TTL };
       }
       upstream = await fetch(target.toString(), init);
@@ -1026,6 +1045,21 @@ async function handleRequest(request, env, ctx) {
 
   const response = await buildResponse(upstream, target, base, { asset });
   response.headers.set("X-CFProxy-Route", route);
+  // 一眼看出这次走的是缓存还是纯透传（分段下载应该是 range-passthrough）
+  response.headers.set(
+    "X-CFProxy-Mode",
+    ranged ? "range-passthrough" : cacheCf ? "edge-cache" : "direct"
+  );
+  // 分段请求却收到 200（说明上游/中间层忽略了 Range），把整份文件当一段发出去
+  // 会让下载器从字节 0 重下。这里记一条日志，方便在 wrangler tail 里定位。
+  if (ranged && response.status === 200) {
+    logEvent("range_ignored", {
+      url: safeUrl(target),
+      range: rangeHeader,
+      length: response.headers.get("content-length"),
+      route,
+    });
+  }
   // 便于在浏览器 DevTools / curl 里一眼看出慢在哪一段：
   // edge = 大区内部处理（含鉴权查询），upstream = 回源拿到响应头的耗时
   response.headers.set(
