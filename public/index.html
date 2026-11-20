@@ -4,7 +4,93 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GitHub 加速代理 · CF Proxy</title>
-<link rel="stylesheet" href="/app.css">
+<style>
+  :root {
+    --bg: #f7f7f7;
+    --card: #ffffff;
+    --text: #111111;
+    --muted: #777777;
+    --line: #e7e7e7;
+    --ink: #111111;
+    --ink-hover: #333333;
+    --chip: #f2f2f2;
+    --r-lg: 22px;
+    --r-md: 14px;
+    --r-sm: 10px;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 48px 20px 72px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 30px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 15px; flex: none;
+    background: var(--ink); display: grid; place-items: center;
+  }
+  h1 { font-size: 23px; margin: 0; letter-spacing: -.4px; line-height: 1.3; font-weight: 700; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .badge {
+    margin-left: auto; font-size: 12px; color: var(--text);
+    background: var(--card); border: 1px solid var(--line);
+    padding: 5px 12px; border-radius: 999px; white-space: nowrap;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--r-lg);
+    padding: 26px 28px; margin-bottom: 18px;
+  }
+  h2 { font-size: 15px; margin: 0 0 18px; display: flex; align-items: center; gap: 9px; font-weight: 700; }
+  h2::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+  .field { display: flex; gap: 10px; flex-wrap: wrap; }
+  input[type=text] {
+    flex: 1 1 260px; min-width: 0; height: 44px; padding: 0 14px;
+    border: 1px solid #dedede; border-radius: var(--r-md); color: var(--text);
+    background: #fff; outline: none; font: inherit; font-size: 14px;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input[type=text]::placeholder { color: #aaa; }
+  input[type=text]:focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(17, 17, 17, .07); }
+  button {
+    height: 44px; padding: 0 20px; border: 1px solid var(--ink); border-radius: var(--r-md); cursor: pointer;
+    background: var(--ink); color: #fff; font: inherit; font-size: 14px; font-weight: 600;
+    transition: background .15s, border-color .15s, transform .1s;
+  }
+  button:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
+  button:active { transform: translateY(1px); }
+  button.ghost { background: #fff; color: var(--text); border-color: var(--line); }
+  button.ghost:hover { background: var(--chip); border-color: #d4d4d4; }
+  .base-row { margin-bottom: 18px; }
+  .base-row input[type=text] { width: 100%; }
+  .result { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+  .result .row { display: flex; gap: 10px; margin-bottom: 14px; }
+  .msg { font-size: 13px; margin: 14px 0 0; min-height: 20px; color: var(--muted); }
+  .msg.ok { color: var(--text); }
+  .msg.ok::before { content: "●"; font-size: 9px; vertical-align: 2px; margin-right: 7px; }
+  .msg.err { color: var(--text); }
+  .msg.err::before { content: "○"; font-size: 11px; vertical-align: 1px; margin-right: 7px; }
+  .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+  .link {
+    text-align: left; height: auto; padding: 14px 16px; background: #fff;
+    border: 1px solid var(--line); border-radius: var(--r-md); color: var(--text); font-weight: 600;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .link:hover { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .link small { display: block; color: var(--muted); font-size: 11px; font-weight: 400; margin-top: 3px; }
+  .link:hover small { color: #bdbdbd; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 30px; }
+  @media (max-width: 560px) {
+    .wrap { padding: 30px 14px 52px; }
+    header { gap: 12px; }
+    .badge { display: none; }
+    .card { padding: 20px 16px; border-radius: 18px; }
+  }
+</style>
 </head>
 <body>
 <div class="wrap">
@@ -19,17 +105,10 @@
       <h1>GitHub 加速代理</h1>
       <div class="sub">基于 Cloudflare Workers 的反向代理，边缘缓存加速访问</div>
     </div>
-    <div class="header-actions" id="userBar" hidden>
-      <span class="who" id="who"></span>
-      <a class="btn" href="/ip.html">优选 IP</a>
-      <a class="btn" id="adminLink" href="/admin.html" hidden>用户管理</a>
-      <button class="ghost small" id="logoutBtn">退出</button>
-    </div>
+    <span class="badge">Cloudflare Workers</span>
   </header>
 
-  <div class="loading" id="loading">正在检查登录状态…</div>
-
-  <main id="mainContent" hidden>
+  <main>
     <section class="card">
       <h2>链接转换</h2>
       <div class="base-row">
@@ -42,7 +121,7 @@
         <button id="convertBtn">生成加速链接</button>
       </div>
       <div class="result" id="resultBox" hidden>
-        <label for="result">加速后的链接（会自动预热到边缘缓存，就绪后下载最快）</label>
+        <label for="result">加速后的链接（首次下载建议先点「预热缓存」）</label>
         <div class="row">
           <input type="text" id="result" readonly>
           <button id="jumpBtn">一键跳转</button>
@@ -54,7 +133,6 @@
           <input type="text" id="clone" readonly>
           <button class="ghost" id="copyCloneBtn">复制</button>
         </div>
-        <p class="warm-state" id="warmState" hidden></p>
       </div>
       <p class="msg" id="msg"></p>
     </section>
@@ -70,12 +148,12 @@
         <button class="link" data-url="https://github.com/microsoft/vscode/releases">Release 页面<small>大文件下载</small></button>
       </div>
     </section>
+
   </main>
 
   <footer>Cloudflare Workers · GitHub Reverse Proxy · 请遵守 GitHub 服务条款，勿用于滥用流量</footer>
 </div>
 
-<script src="/app.js"></script>
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
@@ -84,7 +162,6 @@
   var resultBox = $('resultBox');
   var msg = $('msg');
   var currentTarget = null;
-  var currentUser = null;
 
   var ALLOWED = [
     'github.com', 'www.github.com', 'raw.githubusercontent.com', 'api.github.com',
@@ -153,8 +230,6 @@
     $('clone').value = 'git clone ' + b + '/' + cloneUrl;
     resultBox.hidden = false;
     setMsg('已生成，复制后即可使用');
-    // 下载类目标：后台自动预热，用户点「一键跳转」时通常已经命中边缘缓存
-    autoWarm(currentTarget);
   }
 
   function copy(text, btn) {
@@ -195,55 +270,6 @@
     } catch (e) { return false; }
   }
 
-  function speedText(bps) {
-    if (!bps) return '';
-    return (bps / 1048576).toFixed(1) + ' MB/s';
-  }
-
-  var warmToken = 0;
-
-  /** 预热：把整份文件写进边缘缓存；之后的分段下载都能在边缘命中，不用回源 */
-  function warmTarget(target, onDone) {
-    var token = ++warmToken;
-    var el = $('warmState');
-    el.hidden = false;
-    el.textContent = '正在预热到边缘缓存…（文件越大越慢，可先下载，后续分段会自动命中）';
-    return fetch(base() + '/__warm?url=' + encodeURIComponent(target), {
-      cache: 'no-store',
-      credentials: 'same-origin'
-    })
-      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
-      .then(function (out) {
-        if (token !== warmToken) return;
-        if (!out.ok || !out.data.ok) throw new Error(out.data.error || '预热失败');
-        if (out.data.skipped) {
-          el.textContent = out.data.error || '文件过大，预热已跳过，仍可直接下载';
-          return;
-        }
-        var mb = (out.data.bytes / 1048576).toFixed(1);
-        var sp = speedText(out.data.speed);
-        el.textContent = '边缘缓存已就绪：' + mb + ' MB' +
-          (sp ? '，回源速度 ' + sp : '') +
-          (out.data.cache === 'HIT' ? '，现在下载走边缘命中' : '');
-        if (onDone) onDone(out.data);
-      })
-      .catch(function (e) {
-        if (token === warmToken) el.textContent = '预热未完成（' + e.message + '），仍可直接下载';
-      });
-  }
-
-  /** 生成链接后自动预热（只对下载类目标，避免无谓回源） */
-  function autoWarm(target) {
-    var el = $('warmState');
-    if (!target || !isDownload(target)) {
-      warmToken++;
-      el.hidden = true;
-      el.textContent = '';
-      return;
-    }
-    warmTarget(target);
-  }
-
   function warmCache(btn) {
     var target = currentTarget;
     if (!target) return setMsg('请先生成加速链接', true);
@@ -251,23 +277,22 @@
     var old = btn.textContent;
     btn.textContent = '预热中…';
     btn.disabled = true;
-    warmTarget(target).then(function () {
-      btn.textContent = old;
-      btn.disabled = false;
-      setMsg('已请求预热，边缘就绪后下载会命中缓存');
-    });
-  }
-
-  function showUser(user) {
-    currentUser = user;
-    $('loading').hidden = true;
-    $('mainContent').hidden = false;
-    $('userBar').hidden = false;
-    var isAdmin = user.role === 'admin';
-    $('who').innerHTML = '你好，<b></b> <span class="role-tag' + (isAdmin ? ' admin' : '') + '">' +
-      (isAdmin ? '管理员' : '用户') + '</span>';
-    $('who').querySelector('b').textContent = user.username;
-    $('adminLink').hidden = !isAdmin;
+    // 走专用接口：整份文件写入边缘缓存后才返回，避免"刚预热就下载"仍然 MISS
+    var endpoint = base() + '/__warm?url=' + encodeURIComponent(target);
+    fetch(endpoint, { cache: 'no-store' })
+      .then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, data: d }; });
+      })
+      .then(function (out) {
+        if (!out.ok || !out.data.ok) throw new Error(out.data.error || '预热失败');
+        var mb = (out.data.bytes / 1048576).toFixed(1);
+        var hit = out.data.cache === 'HIT' ? '（边缘缓存 HIT）' : '';
+        setMsg('预热完成：' + mb + ' MB' + hit + '，现在下载会优先命中边缘缓存');
+      })
+      .catch(function (e) {
+        setMsg('预热未完成（' + e.message + '），仍可直接下载', true);
+      })
+      .then(function () { btn.textContent = old; btn.disabled = false; });
   }
 
   $('convertBtn').addEventListener('click', render);
@@ -276,7 +301,6 @@
   $('copyBtn').addEventListener('click', function () { copy($('result').value, this); });
   $('warmBtn').addEventListener('click', function () { warmCache(this); });
   $('copyCloneBtn').addEventListener('click', function () { copy($('clone').value, this); });
-  $('logoutBtn').addEventListener('click', function () { CF.logout(); });
 
   var links = document.querySelectorAll('.link[data-url]');
   for (var i = 0; i < links.length; i++) {
@@ -286,12 +310,6 @@
       window.open(b + '/' + this.getAttribute('data-url'), '_blank', 'noopener');
     });
   }
-
-  // 未登录直接回登录页（服务端同样会拦截，这里是体验层兜底）
-  CF.me().then(function (user) {
-    if (!user) return CF.toLogin('/');
-    showUser(user);
-  });
 })();
 </script>
 </body>

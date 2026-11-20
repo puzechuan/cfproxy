@@ -13,16 +13,13 @@
  * 4. 成功的下载响应允许浏览器缓存，二次下载连 Worker 都不经过。
  * 5. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
  * 6. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
- * 7. 用户系统：仅注册用户可访问代理；D1 存用户，HMAC 签名会话，服务端可禁用。
  */
 
-import { handleAuthApi, getUser, isInstalled } from "./auth";
-
-// 页面拆分为三个独立 HTML（public/login.html、public/index.html、public/admin.html），
-// 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
+// 静态页面在构建时由 index.html 注入；本地直接运行时为空串，请以部署版本为准
+const UI_HTML = "__UI_HTML__";
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.14";
+const BUILD_ID = "2026-11-20.7";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -128,26 +125,13 @@ function json(data, status = 200, headers = {}) {
   });
 }
 
-function redirect(location) {
-  return new Response(null, {
-    status: 302,
-    headers: { Location: location, "Cache-Control": "no-store" },
+function uiResponse() {
+  return new Response(UI_HTML, {
+    headers: {
+      "Content-Type": "text/html; charset=UTF-8",
+      "Cache-Control": "public, max-age=86400",
+    },
   });
-}
-
-/** 从静态资源绑定取回页面；页面含登录态，统一 no-store，避免被缓存后串号 */
-async function pageResponse(request, env, path) {
-  const target = new URL(path, request.url);
-  if (env && env.ASSETS && typeof env.ASSETS.fetch === "function") {
-    const res = await env.ASSETS.fetch(target.toString());
-    if (res.ok) {
-      const headers = new Headers(res.headers);
-      headers.set("Cache-Control", "no-store");
-      return new Response(res.body, { status: res.status, headers });
-    }
-  }
-  // 极端情况下（未绑定静态资源）至少把用户送回首页，而不是白屏
-  return redirect(target.origin + "/");
 }
 
 /** 一次性签名链接过期后，给出可操作的提示，而不是一个突兀的 500/403 */
@@ -507,19 +491,13 @@ async function buildResponse(upstream, target, base, options = {}) {
     upstream.headers.get("cf-cache-status") || "BYPASS"
   );
 
-  // Release 资产内容不可变：边缘缓存一年，浏览器也存一年（immutable），
-  // 重复下载直接零请求。206 分段响应不让浏览器缓存，避免留下半份对象影响续传。
+  // Release 资产内容不可变，允许浏览器缓存一天：二次下载连 Worker 都不经过。
   // 重定向与文本页面仍禁止缓存，避免旧签名链接残留在浏览器缓存里。
   const cacheableAsset = options.asset && status >= 200 && status < 300;
-  let cacheControl = "no-store";
-  if (status === 206) {
-    cacheControl = "no-store";
-  } else if (cacheableAsset) {
-    cacheControl = isImmutableAsset(target)
-      ? "public, max-age=31536000, immutable"
-      : "public, max-age=86400";
-  }
-  headers.set("Cache-Control", cacheControl);
+  headers.set(
+    "Cache-Control",
+    cacheableAsset ? "public, max-age=86400" : "no-store"
+  );
 
   // 重定向地址必须指回代理，否则浏览器会直连 GitHub
   const location = upstream.headers.get("location");
@@ -585,60 +563,16 @@ const CACHE_TTL = {
   "404": 300,
   "500-599": -1,
 };
-
-/**
- * Release 资产是内容不可变的（同一个 URL 永远同一份字节），可以放心缓存一年：
- * 边缘保留越久，重复下载越容易命中；浏览器端配合 immutable 直接零请求。
- */
-const IMMUTABLE_CACHE_TTL = {
-  "200-299": 31536000,
-  "404": 300,
-  "500-599": -1,
+const ASSET_CACHE_CF = {
+  cacheEverything: true,
+  cacheTtlByStatus: CACHE_TTL,
 };
-
-// 内容不可变的资产宿主：release 的签名对象、归档包
-const IMMUTABLE_ASSET_HOSTS = new Set([
-  "release-assets.githubusercontent.com",
-  "objects.githubusercontent.com",
-  "objects-origin.githubusercontent.com",
-  "github-releases.githubusercontent.com",
-  "assets.githubusercontent.com",
-]);
-
-function isImmutableAsset(target) {
-  const host = target.hostname.toLowerCase();
-  if (IMMUTABLE_ASSET_HOSTS.has(host)) return true;
-  // 带版本号的 release 下载地址内容不可变；latest/ 会跟着新版本变，只能短缓存
-  if (
-    (host === "github.com" || host === "www.github.com") &&
-    /\/releases\/download\//i.test(target.pathname)
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 资产子请求的缓存参数。
- * 注意：cf.cacheKey 是 Enterprise 才生效的选项（免费版会被静默忽略），
- * 免费版真正起作用的是"请求 URL 保持稳定"——所以签名重定向必须由服务端跟随，
- * 让浏览器只访问 /https://github.com/... 这种不含一次性参数的干净地址。
- */
-function assetCacheCf(target, cacheKey) {
-  return {
-    cacheKey,
-    cacheEverything: true,
-    cacheTtlByStatus: isImmutableAsset(target) ? IMMUTABLE_CACHE_TTL : CACHE_TTL,
-  };
-}
 
 /**
  * 预热：在后台完整拉取对象（按块丢弃，不占用内存），把整份文件写进边缘缓存。
  * 之后任意 Range 区间都能命中，避免"每个区间各回源一次"。
  * 以 cacheKey 为单位做并发去重：多线程下载器同时 MISS 时只回源一次。
- * 超过 CF 单对象缓存上限（512MB）的文件预热没有意义，直接放弃，省带宽。
  */
-const MAX_WARM_BYTES = 400 * 1024 * 1024;
 const inFlightWarms = new Map();
 
 function warmAsset(target, cacheCf, routeUrl) {
@@ -664,22 +598,6 @@ function warmAsset(target, cacheCf, routeUrl) {
       })
     );
     const status = normalizeStatus(upstream.status);
-    const declared = Number(upstream.headers.get("content-length") || 0);
-    if (declared > MAX_WARM_BYTES) {
-      if (upstream.body) await upstream.body.cancel();
-      logEvent("warm_skip", {
-        url: safeUrl(target),
-        reason: "too_large",
-        length: declared,
-      });
-      return {
-        status,
-        bytes: 0,
-        length: String(declared),
-        skipped: "too_large",
-        ms: Date.now() - started,
-      };
-    }
     let bytes = 0;
     if (upstream.body) {
       const reader = upstream.body.getReader();
@@ -754,64 +672,6 @@ async function handleRequest(request, env, ctx) {
     return new Response(null, { status: 204 });
   }
 
-  // 认证接口：注册 / 登录 / 登出 / 当前用户 / 管理员操作。
-  // 这些接口自身处理登录态（登录、注册无需登录；管理接口内部校验角色）。
-  if (path.indexOf("/api/") === 0) {
-    const authResponse = await handleAuthApi(request, env, path);
-    if (authResponse) return authResponse;
-    return json({ ok: false, error: "未知接口" }, 404);
-  }
-
-  // ---- 页面路由 ----
-  // 首次部署时只有初始化页可访问；建好管理员后，主页面/管理页在服务端校验身份。
-  // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
-  const isPage =
-    path === "/" ||
-    path === "/index.html" ||
-    path === "/login.html" ||
-    path === "/admin.html" ||
-    path === "/ip.html" ||
-    path === "/init.html";
-  const fromLegacyLink =
-    url.searchParams.has("url") && path !== "/login.html" && path !== "/init.html";
-
-  if (isPage && !fromLegacyLink) {
-    if (!(await isInstalled(env))) {
-      if (path === "/init.html") return pageResponse(request, env, "/init.html");
-      return redirect(base + "/init.html");
-    }
-    if (path === "/init.html") return redirect(base + "/");
-
-    const pageUser = await getUser(request, env);
-    if (path === "/login.html") {
-      if (pageUser) return redirect(base + "/");
-      return pageResponse(request, env, "/login.html");
-    }
-    if (!pageUser) {
-      logEvent("page_auth_required", { path });
-      const next =
-        path === "/" || path === "/index.html"
-          ? "%2F"
-          : encodeURIComponent(path);
-      return redirect(base + "/login.html?next=" + next);
-    }
-    if (path === "/admin.html" && pageUser.role !== "admin") {
-      return redirect(base + "/");
-    }
-    return pageResponse(request, env, path);
-  }
-
-  // 其余一切请求（预热接口 + 代理访问）都必须登录
-  const user = await getUser(request, env);
-  if (!user) {
-    logEvent("auth_required", { path });
-    return json(
-      { error: "请先登录后再使用加速代理", needLogin: true },
-      401,
-      { "WWW-Authenticate": "Session" }
-    );
-  }
-
   // 显式预热接口：等整份文件写完边缘缓存才返回，页面可据此提示用户再下载。
   // 用法：/__warm?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Freleases%2Fdownload%2F...
   if (path === "/__warm") {
@@ -826,7 +686,10 @@ async function handleRequest(request, env, ctx) {
     if (!isDownloadAsset(target)) {
       return json({ ok: false, error: "该链接不是可缓存的下载资源" }, 400);
     }
-    const cacheCf = assetCacheCf(target, assetCacheKey(target));
+    const cacheCf = Object.assign(
+      { cacheKey: assetCacheKey(target) },
+      ASSET_CACHE_CF
+    );
     try {
       const routes = upstreamRoutes(target, env);
       let result;
@@ -858,21 +721,6 @@ async function handleRequest(request, env, ctx) {
         cache,
         ms: Date.now() - started,
       });
-      // 回源吞吐：bytes / 秒，页面直接展示，方便判断"慢在回源还是慢在自己这条线"
-      const speed = result.ms > 0 ? result.bytes / (result.ms / 1000) : 0;
-      if (result.skipped) {
-        return json({
-          ok: true,
-          url: safeUrl(target),
-          status: result.status,
-          bytes: 0,
-          cache,
-          ms: result.ms,
-          speed: 0,
-          skipped: result.skipped,
-          error: "文件超过 400MB，超出边缘缓存单对象上限，预热已跳过",
-        });
-      }
       return json({
         ok: true,
         url: safeUrl(target),
@@ -880,8 +728,6 @@ async function handleRequest(request, env, ctx) {
         bytes: result.bytes,
         cache,
         ms: result.ms,
-        speed: Math.round(speed),
-        colo: (request.cf && request.cf.colo) || "",
       });
     } catch (e) {
       logEvent("warm_api_error", { url: safeUrl(target), error: String(e) });
@@ -889,9 +735,12 @@ async function handleRequest(request, env, ctx) {
     }
   }
 
+  if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
+    return uiResponse();
+  }
+
   const probe = extractTarget(request);
-  // 登录后访问到既不是页面也不是可代理地址的路径：回首页，避免出现空白页
-  if (!probe) return redirect(base + "/");
+  if (!probe) return uiResponse();
   if (probe.error) {
     logEvent("bad_target", { error: probe.error });
     return json(
@@ -918,10 +767,10 @@ async function handleRequest(request, env, ctx) {
     range: isRead ? request.headers.get("range") : null,
   });
 
-  // 回源前的耗时（鉴权查库 + 参数解析）与回源耗时分开记，便于定位瓶颈
-  const fetchStart = Date.now();
   const headers = upstreamHeaders(request);
-  const cacheCf = asset ? assetCacheCf(target, cacheKey) : null;
+  const assetCacheCf = asset
+    ? Object.assign({ cacheKey }, ASSET_CACHE_CF)
+    : null;
   let upstream;
   let route = "direct";
   let upstreamUrl = target.toString();
@@ -941,7 +790,7 @@ async function handleRequest(request, env, ctx) {
             method,
             headers: routeHeaders,
             redirect: "follow",
-            cf: cacheCf,
+            cf: assetCacheCf,
           });
           const result = await fetch(subRequest);
           const status = normalizeStatus(result.status);
@@ -992,12 +841,11 @@ async function handleRequest(request, env, ctx) {
     return json({ error: "上游请求失败", detail: String(e) }, 502);
   }
 
-  const upstreamMs = Date.now() - fetchStart;
   logEvent("upstream", {
     url: safeUrl(target),
     status: upstream.status,
     cache: upstream.headers.get("cf-cache-status"),
-    ms: upstreamMs,
+    ms: Date.now() - started,
     asset,
     route,
     cacheKey: cacheKey || undefined,
@@ -1019,7 +867,7 @@ async function handleRequest(request, env, ctx) {
   if (asset && method === "GET" && request.headers.has("range")) {
     const cacheStatus = upstream.headers.get("cf-cache-status") || "";
     if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
-      ctx.waitUntil(warmAsset(target, cacheCf, upstreamUrl).catch((e) => {
+      ctx.waitUntil(warmAsset(target, assetCacheCf, upstreamUrl).catch((e) => {
         logEvent("warm_error", { url: safeUrl(target), error: String(e) });
       }));
     }
@@ -1027,20 +875,6 @@ async function handleRequest(request, env, ctx) {
 
   const response = await buildResponse(upstream, target, base, { asset });
   response.headers.set("X-CFProxy-Route", route);
-  // 便于在浏览器 DevTools / curl 里一眼看出慢在哪一段：
-  // edge = 大区内部处理（含鉴权查询），upstream = 回源拿到响应头的耗时
-  response.headers.set(
-    "Server-Timing",
-    "edge;dur=" +
-      (fetchStart - started) +
-      ", upstream;dur=" +
-      upstreamMs +
-      ", total;dur=" +
-      (Date.now() - started)
-  );
-  if (asset && response.status === 200 && !response.headers.has("accept-ranges")) {
-    response.headers.set("accept-ranges", "bytes");
-  }
   logEvent("respond", {
     url: safeUrl(target),
     status: response.status,
