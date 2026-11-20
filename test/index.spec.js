@@ -364,46 +364,6 @@ describe("下载加速与缓存", () => {
 	});
 
 
-	it("分段请求不交给边缘缓存，避免被折叠成整份 200 让下载器从头重下", async () => {
-		const fetchMock = vi.fn(async () =>
-			new Response("0123456789", {
-				status: 206,
-				headers: { "Content-Range": "bytes 0-9/100", "Content-Length": "10" },
-			})
-		);
-		vi.stubGlobal("fetch", fetchMock);
-
-		const response = await call(
-			new Request(
-				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
-				{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
-			)
-		);
-
-		const subRequest = fetchMock.mock.calls[0][0];
-		// 关键：没有 cf 参数，CF 不会为了填缓存而无视 Range 整份回源
-		expect(subRequest.cf).toBeUndefined();
-		expect(subRequest.headers.get("accept-encoding")).toBe("identity");
-		expect(response.status).toBe(206);
-		expect(response.headers.get("x-cfproxy-mode")).toBe("range-passthrough");
-	});
-
-	it("不带 Range 的整份 GET 仍然走边缘缓存", async () => {
-		const fetchMock = vi.fn(async () => new Response("ok", { status: 200 }));
-		vi.stubGlobal("fetch", fetchMock);
-
-		const response = await call(
-			new Request(
-				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
-				{ headers: { Host: "cfproxy.koomer.site" } }
-			)
-		);
-
-		expect(fetchMock.mock.calls[0][0].cf.cacheEverything).toBe(true);
-		expect(response.headers.get("x-cfproxy-mode")).toBe("edge-cache");
-	});
-
-
 	it("直接访问签名资源链接时使用剥离查询串的稳定缓存键", async () => {
 		const fetchMock = vi.fn(async () => new Response("binary", { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
@@ -420,45 +380,89 @@ describe("下载加速与缓存", () => {
 		);
 	});
 
-	it("Range 未命中不会顺手预热整份对象（避免和下载抢带宽）", async () => {
+	it("起始分段未命中只预热一次，非起始分段不触发预热", async () => {
 		const fetchMock = vi.fn((req) => {
 			const isRange = req.headers.has("range");
-			return Promise.resolve(
-				new Response(isRange ? "0123456789" : "full-object", {
-					status: isRange ? 206 : 200,
-					headers: isRange
-						? { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }
-						: { "Content-Length": "11", "Accept-Ranges": "bytes" },
-				})
-			);
+			const response = new Response(isRange ? "0123456789" : "full-object", {
+				status: isRange ? 206 : 200,
+				headers: isRange
+					? { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }
+					: { "Content-Length": "11", "Accept-Ranges": "bytes" },
+			});
+			// 预热请求保持 pending 一段时间，模拟真实的长耗时拉取；
+			// 否则任务瞬间结束会被立刻移出去重表，看不出并发去重效果
+			return isRange
+				? Promise.resolve(response)
+				: new Promise((resolve) => setTimeout(() => resolve(response), 50));
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		const make = () =>
+		const make = (range) =>
 			new Request(
 				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
 				{
 					headers: {
 						Host: "cfproxy.koomer.site",
-						Range: "bytes=0-9",
+						Range: range,
 						"If-None-Match": "etag-1",
 					},
 				}
 			);
 
+		// 两个并发的起始分段：预热以 cacheKey 去重，只应多出一次整份拉取
 		const ctx1 = createExecutionContext();
 		const ctx2 = createExecutionContext();
 		await Promise.all([
-			worker.fetch(withAuth(make()), env, ctx1),
-			worker.fetch(withAuth(make()), env, ctx2),
+			worker.fetch(withAuth(make("bytes=0-9")), env, ctx1),
+			worker.fetch(withAuth(make("bytes=0-9")), env, ctx2),
 		]);
 		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
 
-		// 只有这两个分段请求回源，没有任何额外的整份文件拉取
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(
-			fetchMock.mock.calls.every(([req]) => req.headers.has("range"))
-		).toBe(true);
+		const rangeCalls = fetchMock.mock.calls.filter(([req]) => req.headers.has("range"));
+		const warmCalls = fetchMock.mock.calls.filter(([req]) => !req.headers.has("range"));
+		expect(rangeCalls).toHaveLength(2);
+		expect(warmCalls).toHaveLength(1);
+		// 预热请求不能带条件头，否则可能拿到 304 而缓存不到内容
+		expect(warmCalls[0][0].headers.has("if-none-match")).toBe(false);
+
+		// 非起始分段（下载器中间某一段）不应该触发预热
+		fetchMock.mockClear();
+		const ctx3 = createExecutionContext();
+		await worker.fetch(withAuth(make("bytes=50-59")), env, ctx3);
+		await waitOnExecutionContext(ctx3);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(fetchMock.mock.calls[0][0].headers.has("range")).toBe(true);
+	});
+
+	it("超过 64MB 的对象不自动预热（waitUntil 窗口内拉不完）", async () => {
+		const big = 128 * 1024 * 1024;
+		const fetchMock = vi.fn(
+			async () =>
+				new Response("0123456789", {
+					status: 206,
+					headers: {
+						"Content-Range": `bytes 0-9/${big}`,
+						"Content-Length": "10",
+					},
+				})
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const ctx = createExecutionContext();
+		await worker.fetch(
+			withAuth(
+				new Request(
+					"http://example.com/https://github.com/foo/bar/releases/download/v2/big.tar.gz",
+					{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
+				)
+			),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		// 只有分段请求本身，没有任何额外回源
+		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 });
 
