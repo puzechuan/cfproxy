@@ -20,7 +20,6 @@ import {
   handleAuthApi,
   getUser,
   getUserForProxy,
-  getUserBySecret,
   isInstalled,
 } from "./auth";
 
@@ -29,7 +28,7 @@ import {
 // 因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.25";
+const BUILD_ID = "2026-11-20.24";
 
 // 对外地址 → 实际回读的静态文件名。文件名本身不再是访问入口，
 // 否则静态资源绑定会绕过这里的登录与权限校验。
@@ -37,10 +36,6 @@ const PAGE_FILES = {
   "/admin": "/admin.html",
   "/me": "/me.html",
 };
-
-// 免登录密钥访问：/<64位密钥>/<目标地址>。
-// 密钥由 /me 页面生成（等价于登录凭证），适合服务器上的 wget / curl / git。
-const ACCESS_SECRET_PATH = /^\/([A-Za-z0-9]{64})(?=\/)/;
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -223,15 +218,10 @@ function safeUrl(target) {
 
 /* ------------------------------ 目标 URL 解析 ------------------------------ */
 
-/**
- * 解析请求要代理的目标地址。
- * pathOverride：带免登录密钥访问时，密钥段已从路径里剥掉，这里用剥掉后的路径，
- * 否则会把 64 位密钥当成主机名去解析。
- */
-function extractTarget(request, forcedRaw, pathOverride) {
+function extractTarget(request, forcedRaw) {
   const url = new URL(request.url);
   let raw = "";
-  const path = pathOverride || url.pathname || "/";
+  const path = url.pathname || "/";
 
   if (forcedRaw !== undefined) {
     raw = forcedRaw;
@@ -293,14 +283,12 @@ function publicBase(request, url) {
   return url.origin;
 }
 
-/** 重定向使用相对路径，浏览器会按当前访问域名解析，避免跨域跳转。
- *  prefix 是免登录密钥段（如 "/<64位密钥>"），带密钥访问时必须带上它，
- *  否则下一跳就变成需要登录的地址。 */
-function toProxyPath(absolute, prefix) {
+/** 重定向使用相对路径，浏览器会按当前访问域名解析，避免跨域跳转 */
+function toProxyPath(absolute) {
   try {
     const u = new URL(absolute);
     if (u.protocol !== "https:" && u.protocol !== "http:") return absolute;
-    return (prefix || "") + "/" + u.toString();
+    return "/" + u.toString();
   } catch (e) {
     return absolute;
   }
@@ -555,7 +543,7 @@ async function buildResponse(upstream, target, base, options = {}) {
     } catch (e) {
       /* 保留原值 */
     }
-    headers.set("Location", toProxyPath(resolved, options.prefix));
+    headers.set("Location", toProxyPath(resolved));
   }
 
   const contentType = (upstream.headers.get("content-type") || "").toLowerCase();
@@ -822,31 +810,6 @@ async function handleRequest(request, env, ctx) {
     return json({ ok: false, error: "未知接口" }, 404);
   }
 
-  // ---- 免登录密钥访问 ----
-  // /<64位密钥>/https://github.com/... 由 /me 页面生成，作用等价于登录态。
-  // 命中后把密钥段从路径里剥掉，解析/缓存/改写全部复用原有逻辑；
-  // 但改写出的链接与 302 都必须带上密钥前缀，否则页面里点一下就掉回 401。
-  let tokenPrefix = "";
-  let viewPath = path;
-  let tokenUser = null;
-  const secretMatch = ACCESS_SECRET_PATH.exec(path);
-  if (secretMatch) {
-    tokenUser = await getUserBySecret(env, secretMatch[1]);
-    if (!tokenUser) {
-      // 密钥无效 / 已作废 / 账号被禁用：与未登录区分开，方便自行排查
-      logEvent("bad_secret", { ms: Date.now() - started });
-      return json(
-        { error: "访问密钥无效或已停用，请到账号设置页重新生成", needLogin: true },
-        401,
-        { "WWW-Authenticate": "Session" }
-      );
-    }
-    tokenPrefix = "/" + secretMatch[1];
-    viewPath = path.slice(tokenPrefix.length);
-  }
-  // 改写链接、生成跳转都基于这个前缀；带密钥访问时它包含密钥段
-  const proxyBase = base + tokenPrefix;
-
   // ---- 页面路由 ----
   // 首次部署时只有初始化页可访问；建好管理员后，主页面/管理页在服务端校验身份。
   // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
@@ -903,8 +866,7 @@ async function handleRequest(request, env, ctx) {
 
   // 其余一切请求（预热接口 + 代理访问）都必须登录。
   // 这里用带 isolate 缓存的版本：分段下载会高频走进来，不能每个请求都查一次 D1。
-  // 带 64 位密钥访问时，密钥已经换成用户身份，等价于已登录。
-  const user = tokenUser || (await getUserForProxy(request, env));
+  const user = await getUserForProxy(request, env);
   if (!user) {
     logEvent("auth_required", { path });
     return json(
@@ -916,7 +878,7 @@ async function handleRequest(request, env, ctx) {
 
   // 显式预热接口：等整份文件写完边缘缓存才返回，页面可据此提示用户再下载。
   // 用法：/__warm?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Freleases%2Fdownload%2F...
-  if (viewPath === "/__warm") {
+  if (path === "/__warm") {
     const probe = extractTarget(request, url.searchParams.get("url") || "");
     if (!probe || probe.error) {
       return json(
@@ -991,16 +953,15 @@ async function handleRequest(request, env, ctx) {
     }
   }
 
-  const probe = extractTarget(request, undefined, viewPath);
-  // 登录后访问到既不是页面也不是可代理地址的路径：回首页，避免出现空白页。
-  // 这里必须回到不带密钥前缀的首页：否则 /<密钥>/ 会跳回 /<密钥>/ 形成死循环。
+  const probe = extractTarget(request);
+  // 登录后访问到既不是页面也不是可代理地址的路径：回首页，避免出现空白页
   if (!probe) return redirect(base + "/");
   if (probe.error) {
     logEvent("bad_target", { error: probe.error });
     return json(
       {
         error: probe.error,
-        hint: "正确格式：" + proxyBase + "/https://github.com/用户/仓库",
+        hint: "正确格式：" + base + "/https://github.com/用户/仓库",
       },
       400
     );
@@ -1016,7 +977,6 @@ async function handleRequest(request, env, ctx) {
     method,
     url: safeUrl(target),
     asset,
-    via: tokenPrefix ? "secret" : "session",
     colo: request.cf && request.cf.colo,
     country: request.cf && request.cf.country,
     range: isRead ? request.headers.get("range") : null,
@@ -1116,7 +1076,7 @@ async function handleRequest(request, env, ctx) {
       status: upstream.status,
       ms: Date.now() - started,
     });
-    return expiredSignatureResponse(proxyBase);
+    return expiredSignatureResponse(base);
   }
 
   // Range 未命中时，后台补一次整对象预热，之后的任意区间都能直接命中边缘缓存。
@@ -1141,11 +1101,7 @@ async function handleRequest(request, env, ctx) {
     }
   }
 
-  const response = await buildResponse(upstream, target, proxyBase, {
-    asset,
-    // 302 的 Location 也要带上密钥段，否则后续请求掉回 401
-    prefix: tokenPrefix,
-  });
+  const response = await buildResponse(upstream, target, base, { asset });
   response.headers.set("X-CFProxy-Route", route);
   // 便于在浏览器 DevTools / curl 里一眼看出慢在哪一段：
   // edge = 大区内部处理（含鉴权查询），upstream = 回源拿到响应头的耗时

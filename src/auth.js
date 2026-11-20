@@ -602,151 +602,6 @@ async function handleChangePassword(request, env, user) {
   return json({ ok: true });
 }
 
-/* --------------------------- 免登录访问密钥 ------------------------------ */
-
-/**
- * 用户在 /me 生成一把 64 位随机密钥后，可以这样访问代理而无需登录 Cookie：
- *   https://<域名>/<64位密钥>/https://github.com/用户/仓库
- * 适合服务器上的 wget / curl / git、下载工具这类没有浏览器、也不方便反复登录的场景。
- *
- * 存储：没有新增表或字段（线上库已经建好，不想为了一个功能要求手工执行迁移），
- * 直接复用通用的 settings 键值表，正反各存一条：
- *   user_secret:<uid>    -> <密钥>   （页面展示用，按 id 直取）
- *   secret_owner:<密钥>  -> <uid>    （鉴权用，主键直查，O(1)）
- * 重新生成时先删掉旧密钥的反查条目，旧链接立刻失效；账号被禁用时立刻不可用。
- * 密钥等同于密码：只在本人会话下返回，日志中不打印。
- */
-const TOKEN_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-const TOKEN_RE = /^[A-Za-z0-9]{64}$/;
-const SECRET_CACHE_TTL = 30 * 1000;
-const secretCache = new Map(); // 密钥 -> { user, exp }
-
-/** 62 进制字母表，64 位 ≈ 381 bit 熵；248 = 62*4，丢弃尾部避免取模偏差 */
-function randomAccessSecret() {
-  let out = "";
-  const buf = new Uint8Array(64);
-  while (out.length < 64) {
-    crypto.getRandomValues(buf);
-    for (const b of buf) {
-      if (b >= 248) continue;
-      out += TOKEN_ALPHABET[b % 62];
-      if (out.length === 64) break;
-    }
-  }
-  return out;
-}
-
-function userSecretKey(uid) {
-  return "user_secret:" + uid;
-}
-
-function secretOwnerKey(secret) {
-  return "secret_owner:" + secret;
-}
-
-/** 是否是「64 位密钥」这种形态的路径段（不校验有效性） */
-export function isAccessSecret(value) {
-  return TOKEN_RE.test(value || "");
-}
-
-async function readUserSecret(env, uid) {
-  const row = await env.DB.prepare(
-    "SELECT value FROM settings WHERE key = ?"
-  )
-    .bind(userSecretKey(uid))
-    .first();
-  return row && TOKEN_RE.test(row.value || "") ? row.value : null;
-}
-
-/**
- * 密钥 → 用户。格式不对、未登记、账号已禁用都返回 null。
- * 与 getUserForProxy 同理加 isolate 短缓存：分段下载每个请求都走这里，
- * 不能每段都查两次 D1；密钥重新生成 / 停用时清空缓存立即生效。
- */
-export async function getUserBySecret(env, secret) {
-  if (!TOKEN_RE.test(secret || "")) return null;
-  const now = Date.now();
-  const hit = secretCache.get(secret);
-  if (hit && hit.exp > now) return hit.user;
-
-  const row = await env.DB.prepare(
-    "SELECT value FROM settings WHERE key = ?"
-  )
-    .bind(secretOwnerKey(secret))
-    .first();
-  const uid = row ? Number(row.value) : 0;
-  if (!uid) {
-    secretCache.delete(secret);
-    return null;
-  }
-
-  const user = await env.DB.prepare(
-    "SELECT id, username, role, disabled FROM users WHERE id = ?"
-  )
-    .bind(uid)
-    .first();
-  if (!user || user.disabled) {
-    secretCache.delete(secret);
-    return null;
-  }
-  if (secretCache.size >= 2000) secretCache.clear();
-  secretCache.set(secret, { user, exp: now + SECRET_CACHE_TTL });
-  return user;
-}
-
-/** 生成 / 重新生成：旧密钥同时作废，返回新密钥 */
-async function handleIssueSecret(env, user) {
-  const prev = await readUserSecret(env, user.id);
-  const secret = randomAccessSecret();
-  const now = new Date().toISOString();
-  const statements = [
-    env.DB.prepare(
-      "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)"
-    ).bind(userSecretKey(user.id), secret),
-    env.DB.prepare(
-      "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)"
-    ).bind(secretOwnerKey(secret), String(user.id)),
-    // 记录生成时间，便于页面展示与排查
-    env.DB.prepare(
-      "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)"
-    ).bind("secret_created:" + user.id, now),
-  ];
-  if (prev) {
-    statements.push(
-      env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(
-        secretOwnerKey(prev)
-      )
-    );
-  }
-  await env.DB.batch(statements);
-  secretCache.clear();
-  return json({ ok: true, secret, created_at: now });
-}
-
-/** 停用：删掉正反两条记录，旧链接立刻 401 */
-async function handleRevokeSecret(env, user) {
-  const prev = await readUserSecret(env, user.id);
-  const statements = [
-    env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(
-      userSecretKey(user.id)
-    ),
-    env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(
-      "secret_created:" + user.id
-    ),
-  ];
-  if (prev) {
-    statements.push(
-      env.DB.prepare("DELETE FROM settings WHERE key = ?").bind(
-        secretOwnerKey(prev)
-      )
-    );
-  }
-  await env.DB.batch(statements);
-  secretCache.clear();
-  return json({ ok: true, secret: null });
-}
-
 /* ------------------------------ 管理接口 -------------------------------- */
 
 async function handleAdminList(env) {
@@ -876,12 +731,6 @@ export async function handleAuthApi(request, env, path) {
   if (path === "/api/me") {
     const user = await getUser(request, env);
     if (!user) return json({ ok: false, user: null }, 401);
-    const secret = await readUserSecret(env, user.id);
-    const createdSec = secret
-      ? await env.DB.prepare("SELECT value FROM settings WHERE key = ?")
-          .bind("secret_created:" + user.id)
-          .first()
-      : null;
     return json({
       ok: true,
       user: {
@@ -890,18 +739,8 @@ export async function handleAuthApi(request, env, path) {
         id: user.id,
         created_at: user.created_at || null,
         last_login: user.last_login || null,
-        // 免登录访问密钥：只在本人会话下返回，未生成时为 null
-        secret: secret || null,
-        secret_created_at: (createdSec && createdSec.value) || null,
       },
     });
-  }
-  if (path === "/api/me/secret") {
-    const user = await getUser(request, env);
-    if (!user) return json({ ok: false, error: "请先登录" }, 401);
-    if (method === "POST") return handleIssueSecret(env, user);
-    if (method === "DELETE") return handleRevokeSecret(env, user);
-    return json({ ok: false, error: "未知接口" }, 404);
   }
   if (path === "/api/me/password" && method === "POST") {
     const user = await getUser(request, env);
