@@ -937,6 +937,23 @@ describe("用户系统 · 访问控制", () => {
 		expect(res.headers.get("location")).toMatch(/\/$/);
 	});
 
+	it("未登录访问优选 IP 页跳转登录页并记住原地址", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/ip.html"),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(302);
+		const location = res.headers.get("location");
+		expect(location).toContain("/login.html");
+		expect(location).toContain("%2Fip.html");
+	});
+
+	it("登录后可打开优选 IP 页", async () => {
+		const res = await call(new Request("http://example.com/ip.html"));
+		expectPageServed(res, "ip.html");
+	});
+
 	it("登录后可访问代理（会话 Cookie 生效）", async () => {
 		// 不真的打外网，避免网络抖动导致偶发失败
 		vi.stubGlobal(
