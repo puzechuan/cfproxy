@@ -1264,3 +1264,113 @@ describe("用户系统 · 管理员", () => {
 		sessionCookie = (relogin.headers.get("set-cookie") || "").split(";")[0];
 	});
 });
+
+describe("账号设置页 /me", () => {
+	const SCRATCH_USER = "meuser";
+	const SCRATCH_PASS = "mepass12345";
+	const SCRATCH_NEW = "mepass67890";
+
+	async function api(req) {
+		return worker.fetch(req, env, createExecutionContext());
+	}
+
+	function loginReq(username, password) {
+		return new Request("http://example.com/api/login", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ username, password }),
+		});
+	}
+
+	function postPassword(cookie, payload) {
+		const req = new Request("http://example.com/api/me/password", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(payload),
+		});
+		if (cookie) req.headers.set("cookie", cookie);
+		return req;
+	}
+
+	it("/me.html 与 /me/ 一律跳转到 /me", async () => {
+		for (const path of ["/me.html", "/me/"]) {
+			const res = await raw(new Request("http://example.com" + path));
+			expect(res.status).toBe(302);
+			expect(res.headers.get("location")).toMatch(/\/me$/);
+		}
+	});
+
+	it("未登录访问 /me 跳登录页并记住原地址", async () => {
+		const res = await raw(new Request("http://example.com/me"));
+		expect(res.status).toBe(302);
+		const location = res.headers.get("location");
+		expect(location).toContain("/login.html");
+		expect(location).toContain("%2Fme");
+	});
+
+	it("登录用户可以打开账号设置页", async () => {
+		const res = await call(new Request("http://example.com/me"));
+		expectPageServed(res, "me.html");
+	});
+
+	it("未登录不能修改密码（401）", async () => {
+		const res = await api(
+			postPassword("", { currentPassword: "whatever", newPassword: "12345678" })
+		);
+		expect(res.status).toBe(401);
+	});
+
+	it("新密码过短、与当前密码相同、当前密码错误都被拒绝", async () => {
+		const reg = await raw(
+			jsonRequest("/api/register", { username: SCRATCH_USER, password: SCRATCH_PASS })
+		);
+		expect(reg.status).toBe(200);
+		const cookie = (reg.headers.get("set-cookie") || "").split(";")[0];
+
+		const tooShort = await api(
+			postPassword(cookie, { currentPassword: SCRATCH_PASS, newPassword: "short" })
+		);
+		expect(tooShort.status).toBe(400);
+
+		const same = await api(
+			postPassword(cookie, { currentPassword: SCRATCH_PASS, newPassword: SCRATCH_PASS })
+		);
+		expect(same.status).toBe(400);
+
+		const wrongCurrent = await api(
+			postPassword(cookie, { currentPassword: "wrong-password", newPassword: SCRATCH_NEW })
+		);
+		expect(wrongCurrent.status).toBe(403);
+	});
+
+	it("改密成功后旧密码失效、新密码可登录，当前会话仍然有效", async () => {
+		const login = await api(loginReq(SCRATCH_USER, SCRATCH_PASS));
+		expect(login.status).toBe(200);
+		const cookie = (login.headers.get("set-cookie") || "").split(";")[0];
+
+		const changed = await api(
+			postPassword(cookie, { currentPassword: SCRATCH_PASS, newPassword: SCRATCH_NEW })
+		);
+		expect(changed.status).toBe(200);
+
+		const oldLogin = await api(loginReq(SCRATCH_USER, SCRATCH_PASS));
+		expect(oldLogin.status).toBe(401);
+
+		const newLogin = await api(loginReq(SCRATCH_USER, SCRATCH_NEW));
+		expect(newLogin.status).toBe(200);
+
+		// 会话是无状态签名 Cookie，改密不会把已登录设备踢下线
+		const meReq = new Request("http://example.com/api/me");
+		meReq.headers.set("cookie", cookie);
+		const me = await api(meReq);
+		expect(me.status).toBe(200);
+	});
+
+	it("/api/me 返回账号信息字段（注册时间 / 最近登录）", async () => {
+		const res = await call(new Request("http://example.com/api/me"));
+		const data = await res.json();
+		expect(data.user.username).toBe(TEST_USER);
+		expect(data.user).toHaveProperty("created_at");
+		expect(data.user).toHaveProperty("last_login");
+	});
+});

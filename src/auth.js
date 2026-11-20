@@ -210,7 +210,7 @@ export async function getUser(request, env) {
   const payload = await verifySession(token, secret);
   if (!payload || !payload.uid) return null;
   const user = await env.DB.prepare(
-    "SELECT id, username, role, disabled FROM users WHERE id = ?"
+    "SELECT id, username, role, disabled, created_at, last_login FROM users WHERE id = ?"
   )
     .bind(payload.uid)
     .first();
@@ -551,6 +551,57 @@ function handleLogout() {
   });
 }
 
+/* ------------------------------ 自助改密 -------------------------------- */
+
+/**
+ * 用户修改自己的登录密码（页面 /me）。
+ * 1. 必须已登录：用户 id 只取自会话，绝不从请求体取，避免改到别人账号。
+ * 2. 必须校验当前密码，防止会话被临时借用时直接改密夺号。
+ * 3. 新密码走与注册完全相同的规则（≥8 位）和 PBKDF2 派生，盐每次都换新的。
+ * 4. 会话是无状态签名 Cookie（不含密码指纹），所以改密不会让其它设备上
+ *    已登录的会话立刻失效；页面会提示用户自行退出其它设备。
+ */
+async function handleChangePassword(request, env, user) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ ok: false, error: "请求格式错误" }, 400);
+  }
+  const currentPassword = body.currentPassword || "";
+  const newPassword = body.newPassword || "";
+  if (typeof newPassword !== "string" || newPassword.length < 8) {
+    return json({ ok: false, error: "新密码至少 8 位" }, 400);
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT id, pass_hash, salt FROM users WHERE id = ?"
+  )
+    .bind(user.id)
+    .first();
+  if (!row) return json({ ok: false, error: "用户不存在" }, 404);
+
+  if (!(await verifyPassword(currentPassword, row.salt, row.pass_hash))) {
+    return json({ ok: false, error: "当前密码不正确" }, 403);
+  }
+  if (currentPassword === newPassword) {
+    return json({ ok: false, error: "新密码不能与当前密码相同" }, 400);
+  }
+
+  const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+  const salt = b64urlEncode(saltBytes);
+  const passHash = await deriveHash(newPassword, saltBytes);
+  const result = await env.DB.prepare(
+    "UPDATE users SET pass_hash = ?, salt = ? WHERE id = ?"
+  )
+    .bind(passHash, salt, user.id)
+    .run();
+  if (!result.success || !result.meta || result.meta.changes === 0) {
+    return json({ ok: false, error: "保存失败，请稍后重试" }, 500);
+  }
+  return json({ ok: true });
+}
+
 /* ------------------------------ 管理接口 -------------------------------- */
 
 async function handleAdminList(env) {
@@ -682,8 +733,19 @@ export async function handleAuthApi(request, env, path) {
     if (!user) return json({ ok: false, user: null }, 401);
     return json({
       ok: true,
-      user: { username: user.username, role: user.role, id: user.id },
+      user: {
+        username: user.username,
+        role: user.role,
+        id: user.id,
+        created_at: user.created_at || null,
+        last_login: user.last_login || null,
+      },
     });
+  }
+  if (path === "/api/me/password" && method === "POST") {
+    const user = await getUser(request, env);
+    if (!user) return json({ ok: false, error: "请先登录" }, 401);
+    return handleChangePassword(request, env, user);
   }
 
   if (path.startsWith("/api/admin/")) {

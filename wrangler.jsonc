@@ -18,7 +18,8 @@
 		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件。
 		// "/admin.html" 必须留着：它不在名单里，静态资源绑定会直接把这个文件吐出去，
 		// 绕过 Worker 里的登录与管理员校验；"/admin" 与 "/admin/" 则是对外地址本身。
-		"run_worker_first": ["/", "/index.html", "/login.html", "/admin", "/admin/", "/admin.html", "/init.html"]
+		// "/me" 是账号设置页（改密）的对外地址，实体文件 me.html 同理必须留在名单里。
+		"run_worker_first": ["/", "/index.html", "/login.html", "/admin", "/admin/", "/admin.html", "/me", "/me/", "/me.html", "/init.html"]
 	},
 	"d1_databases": [
 		{
