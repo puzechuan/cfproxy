@@ -11,13 +11,11 @@
 		"global_fetch_strictly_public"
 	],
 	"assets": {
-		// 静态页面目录：/init.html 首次初始化、/login.html 登录注册、/index.html 主页面、用户管理页 /admin
+		// 静态页面目录：/init.html 首次初始化、/login.html 登录注册、/index.html 主页面、/admin.html 用户管理
 		"directory": "./public",
 		"binding": "ASSETS",
-		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件。
-		// /admin 是对外路由，/admin.html 仍在这里拦截，只用于跳转到 /admin，
-		// 否则静态文件可以被直接打开、绕过服务端鉴权。
-		"run_worker_first": ["/", "/index.html", "/login.html", "/admin", "/admin.html", "/init.html"]
+		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件
+		"run_worker_first": ["/", "/index.html", "/login.html", "/admin.html", "/init.html"]
 	},
 	"d1_databases": [
 		{

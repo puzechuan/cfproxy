@@ -25,10 +25,9 @@ import {
 
 // 页面拆分为三个独立 HTML（public/login.html、public/index.html、public/admin.html），
 // 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
-// 对外只暴露 /admin 这一个管理页地址，静态文件 /admin.html 会被统一跳转到 /admin。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.18";
+const BUILD_ID = "2026-11-20.16";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -645,42 +644,7 @@ function assetCacheCf(target, cacheKey) {
  * 超过 CF 单对象缓存上限（512MB）的文件预热没有意义，直接放弃，省带宽。
  */
 const MAX_WARM_BYTES = 400 * 1024 * 1024;
-
-/**
- * 自动预热只覆盖中小文件。
- * 预热跑在 ctx.waitUntil 里，响应发出后平台给的运行窗口有限（约 30 秒），
- * 大文件根本拉不完，白白烧掉一条回源连接，所以超过这个尺寸就交给手动预热。
- */
-const MAX_AUTO_WARM_BYTES = 64 * 1024 * 1024;
-
-/** 延迟多久再开始预热：先让客户端把首段数据拿到手，避免一上来就抢带宽 */
-const AUTO_WARM_DELAY_MS = 3000;
-
 const inFlightWarms = new Map();
-
-/**
- * Range 是否从字节 0 开始。
- * 多线程下载器每个分段各发一个 Range，若每段都触发预热，同一个文件会被并发拉 N 次，
- * 正好把出网带宽吃干净。只让起始分段负责触发，8 线程也只会预热一次。
- */
-function isLeadingRange(value) {
-  if (!value) return false;
-  const m = /^bytes\s*=\s*(\d+)\s*-/i.exec(String(value).trim());
-  return !!m && Number(m[1]) === 0;
-}
-
-/** 响应代表的对象总字节数：206 看 Content-Range 的分母，200 看 Content-Length */
-function responseTotalBytes(response) {
-  const range = response.headers.get("content-range");
-  if (range) {
-    const m = /\/(\d+)\s*$/.exec(range);
-    if (m) return Number(m[1]);
-  }
-  const len = Number(response.headers.get("content-length"));
-  return Number.isFinite(len) && len > 0 ? len : 0;
-}
-
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function warmAsset(target, cacheCf, routeUrl) {
   const key = cacheCf.cacheKey;
@@ -806,24 +770,15 @@ async function handleRequest(request, env, ctx) {
   // ---- 页面路由 ----
   // 首次部署时只有初始化页可访问；建好管理员后，主页面/管理页在服务端校验身份。
   // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
-  // 管理页统一走 /admin；旧的文件地址 /admin.html 只做跳转，
-  // 这样静态文件不会被直接打开而绕过下面这段服务端鉴权。
-  if (path === "/admin.html" || path === "/admin/") {
-    return redirect(base + "/admin");
-  }
-
   const isPage =
     path === "/" ||
     path === "/index.html" ||
     path === "/login.html" ||
-    path === "/admin" ||
+    path === "/admin.html" ||
     path === "/ip.html" ||
     path === "/init.html";
   const fromLegacyLink =
-    url.searchParams.has("url") &&
-    path !== "/login.html" &&
-    path !== "/init.html" &&
-    path !== "/admin";
+    url.searchParams.has("url") && path !== "/login.html" && path !== "/init.html";
 
   if (isPage && !fromLegacyLink) {
     if (!(await isInstalled(env))) {
@@ -845,11 +800,10 @@ async function handleRequest(request, env, ctx) {
           : encodeURIComponent(path);
       return redirect(base + "/login.html?next=" + next);
     }
-    if (path === "/admin" && pageUser.role !== "admin") {
+    if (path === "/admin.html" && pageUser.role !== "admin") {
       return redirect(base + "/");
     }
-    // /admin 只是对外路由，实际页面仍由静态资源提供
-    return pageResponse(request, env, path === "/admin" ? "/admin.html" : path);
+    return pageResponse(request, env, path);
   }
 
   // 其余一切请求（预热接口 + 代理访问）都必须登录。
@@ -976,7 +930,6 @@ async function handleRequest(request, env, ctx) {
   const cacheCf = asset ? assetCacheCf(target, cacheKey) : null;
   let upstream;
   let route = "direct";
-  let upstreamUrl = target.toString();
   try {
     if (asset) {
       // 服务端跟随重定向：浏览器只访问干净链接，缓存键稳定，少一次完整往返。
@@ -1008,7 +961,6 @@ async function handleRequest(request, env, ctx) {
           }
           upstream = result;
           route = candidate.name;
-          upstreamUrl = candidate.url;
           break;
         } catch (e) {
           lastError = e;
@@ -1067,27 +1019,10 @@ async function handleRequest(request, env, ctx) {
     return expiredSignatureResponse(base);
   }
 
-  // Range 未命中时，后台补一次整对象预热，之后的任意区间都能直接命中边缘缓存。
-  // 预热会和客户端抢同一条出网通道，所以设了四道闸门：
-  //   1) 只由起始分段（bytes=0-…）触发 —— 8 线程下载器只预热一次而不是 8 次
-  //   2) 延迟 3 秒再启动 —— 先让客户端把首段数据拿到手
-  //   3) 只对 64MB 以内文件生效 —— 再大在 waitUntil 窗口里拉不完
-  //   4) 以 cacheKey 在 isolate 内去重，并发请求共用一个预热任务
-  if (asset && method === "GET" && isLeadingRange(request.headers.get("range"))) {
-    const cacheStatus = (upstream.headers.get("cf-cache-status") || "").toUpperCase();
-    const edgeHit = /HIT|STALE|REVALIDATED/.test(cacheStatus);
-    const total = responseTotalBytes(upstream);
-    if (!edgeHit && total > 0 && total <= MAX_AUTO_WARM_BYTES) {
-      const warmCacheCf = assetCacheCf(target, cacheKey);
-      ctx.waitUntil(
-        delay(AUTO_WARM_DELAY_MS)
-          .then(() => warmAsset(target, warmCacheCf, upstreamUrl))
-          .catch((e) => {
-            logEvent("warm_error", { url: safeUrl(target), error: String(e) });
-          })
-      );
-    }
-  }
+  // 这里曾经在「Range 未命中」时后台预热整份对象，已移除：
+  // 预热和被代理的下载抢同一条出网通道，多线程下载器每个分段 MISS 都会触发一次，
+  // 实测净效果是首次下载速度接近腰斩，而收益（后续区间命中）只在重复下载时才体现。
+  // 预热改为显式操作，由 /__warm 或页面上的「预热缓存」按钮触发。
 
   const response = await buildResponse(upstream, target, base, { asset });
   response.headers.set("X-CFProxy-Route", route);

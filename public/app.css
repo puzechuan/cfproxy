@@ -152,37 +152,6 @@ td .muted { color: var(--muted); font-size: 11.5px; }
 }
 .stat b { color: var(--text); font-size: 15px; margin-right: 4px; }
 
-/* 管理页：注册开关 */
-.setting-row {
-  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
-  padding: 4px 0 2px;
-}
-.setting-text { flex: 1 1 320px; min-width: 0; }
-.setting-title { font-size: 14px; font-weight: 600; color: var(--text); }
-.setting-desc { font-size: 12.5px; color: var(--muted); margin-top: 4px; line-height: 1.65; }
-.setting-control { display: flex; align-items: center; gap: 10px; flex: none; }
-.state-label { font-size: 12.5px; color: var(--muted); }
-/* 需要比 .state-on / .state-off 更具体，否则会被上面的灰色覆盖 */
-.state-label.state-on { color: #067647; }
-.state-label.state-off { color: #b42318; }
-.switch {
-  position: relative; width: 46px; height: 26px; padding: 0; flex: none;
-  border-radius: 999px; border: 1px solid #d9d9d9; background: #ececec;
-  transition: background .18s, border-color .18s;
-}
-.switch:hover { background: #e2e2e2; border-color: #cfcfcf; }
-.switch .knob {
-  position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
-  border-radius: 50%; background: #fff; border: 1px solid rgba(0, 0, 0, .08);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .15);
-  transition: transform .18s, background .18s;
-}
-.switch[aria-checked="true"] { background: var(--ink); border-color: var(--ink); }
-.switch[aria-checked="true"]:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
-.switch[aria-checked="true"] .knob { transform: translateX(20px); }
-.switch:active { transform: none; }
-.switch[disabled] { opacity: .6; cursor: not-allowed; }
-
 /* 优选 IP 页：说明文字、代码块、IP 胶囊 */
 .prose { font-size: 13.5px; color: var(--muted); line-height: 1.78; max-width: var(--form); margin: 0 0 14px; }
 .prose:last-child { margin-bottom: 0; }
