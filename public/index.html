@@ -22,7 +22,6 @@
     <div class="header-actions" id="userBar" hidden>
       <span class="who" id="who"></span>
       <a class="btn" href="/ip.html">优选 IP</a>
-      <a class="btn" href="/cfproxy-login.sh" download="cfproxy-login.sh">登录脚本</a>
       <a class="btn" id="adminLink" href="/admin" hidden>用户管理</a>
       <button class="ghost small" id="logoutBtn">退出</button>
     </div>
@@ -69,25 +68,6 @@
         <button class="link" data-url="https://api.github.com/repos/torvalds/linux">GitHub API<small>api.github.com</small></button>
         <button class="link" data-url="https://codeload.github.com/torvalds/linux/zip/refs/heads/master">源码压缩包<small>codeload.github.com</small></button>
         <button class="link" data-url="https://github.com/microsoft/vscode/releases">Release 页面<small>大文件下载</small></button>
-      </div>
-    </section>
-
-    <section class="card">
-      <h2>命令行 / 服务器使用</h2>
-      <p class="prose">
-        没有浏览器的机器上，用登录脚本调一次 <b>/api/login</b> 换取会话 Cookie，
-        写到 <span class="mono">~/.cfproxy.cookie</span>（权限 600）。
-        之后 <span class="mono">curl</span> / <span class="mono">wget</span> / <span class="mono">aria2c</span>
-        直接读这个文件；<span class="mono">git</span> 则把 token 放进请求头。
-        会话 7 天过期，到期重跑一次脚本即可。
-      </p>
-      <div class="dl-row">
-        <a class="btn solid" href="/cfproxy-login.sh" download="cfproxy-login.sh">下载 cfproxy-login.sh</a>
-        <span class="dl-meta">bash 脚本，约 6 KB，只依赖 curl</span>
-      </div>
-      <div class="code-wrap">
-        <div class="code-bar"><button class="ghost small" id="copyScriptBtn">复制命令</button></div>
-        <pre class="code" id="scriptSnippet"></pre>
       </div>
     </section>
   </main>
@@ -295,25 +275,6 @@
   $('warmBtn').addEventListener('click', function () { warmCache(this); });
   $('copyCloneBtn').addEventListener('click', function () { copy($('clone').value, this); });
   $('logoutBtn').addEventListener('click', function () { CF.logout(); });
-
-  // 命令行卡片：代码块里的站点地址按当前访问域名生成，复制沿用上面的 copy()
-  (function initScriptSnippet() {
-    var origin = (location.protocol === 'http:' || location.protocol === 'https:')
-      ? location.origin
-      : 'https://你的域名';
-    var lines = [
-      'chmod +x cfproxy-login.sh',
-      // 交互输入用户名和密码；密码不会回显
-      './cfproxy-login.sh -b ' + origin,
-      'curl -b ~/.cfproxy.cookie -fLO \'' + origin + '/https://github.com/u/r/releases/download/v1/x.zip\'',
-      'git -c http.extraHeader="Cookie: cfproxy_session=$(./cfproxy-login.sh -t)" clone \'' + origin + '/https://github.com/u/r.git\''
-    ];
-    var snippet = $('scriptSnippet');
-    if (!snippet) return;
-    // 最后两行放不下时允许横向滚动，这里不折行，保持可直接整行复制
-    snippet.textContent = lines.join('\n');
-    $('copyScriptBtn').addEventListener('click', function () { copy(snippet.textContent, this); });
-  })();
 
   var links = document.querySelectorAll('.link[data-url]');
   for (var i = 0; i < links.length; i++) {
