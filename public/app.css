@@ -110,11 +110,14 @@ a.btn.solid:hover { background: var(--ink-hover); border-color: var(--ink-hover)
   flex: 1; background: #fff; color: var(--muted); border: 1px solid var(--line); height: 36px;
 }
 .tabs button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
-.auth-form { display: flex; flex-direction: column; gap: 12px; }
-.auth-form .row-field { display: flex; flex-direction: column; }
-.auth-form input { width: 100%; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+/* 纵向排列时 flex-basis 会作用于高度，这里必须重置，否则输入框会被撑成 260px 高 */
+.auth-form .row-field { display: flex; flex-direction: column; gap: 7px; }
+.auth-form .row-field label { margin: 0; }
+.auth-form input { width: 100%; flex: 0 0 auto; height: 42px; font-size: 14px; }
+.auth-form > button { height: 42px; margin-top: 2px; }
 .auth-hint { font-size: 12px; color: var(--muted); margin: 0; }
-.auth-box { max-width: 420px; margin: 30px auto 0; }
+.auth-box { max-width: 530px; margin: 30px auto 0; padding: 28px 30px; }
 .auth-box h2 { justify-content: center; }
 
 /* 用户管理表格 */
