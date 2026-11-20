@@ -128,6 +128,19 @@ a.btn.solid:hover { background: var(--ink-hover); border-color: var(--ink-hover)
 .auth-box { max-width: 530px; margin: 30px auto 0; padding: 28px 30px; }
 .auth-box h2 { justify-content: center; }
 
+/* 登录脚本下载：登录页底部一行提示、主页面按钮行 */
+.dl-hint {
+  max-width: 530px; margin: 18px auto 0; text-align: center;
+  font-size: 12px; line-height: 1.75; color: var(--muted);
+}
+.dl-hint a {
+  color: var(--text); font-weight: 600; text-decoration: none;
+  border-bottom: 1px solid #cfcfcf; padding-bottom: 1px;
+}
+.dl-hint a:hover { border-color: var(--text); }
+.dl-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; max-width: var(--form); }
+.dl-meta { font-size: 12px; color: var(--muted); }
+
 /* 用户管理表格 */
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
