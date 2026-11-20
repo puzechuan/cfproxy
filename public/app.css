@@ -44,16 +44,16 @@ h2::before { content: ""; width: 7px; height: 7px; border-radius: 50%; backgroun
 label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 8px; }
 .field { display: flex; gap: 10px; flex-wrap: wrap; max-width: var(--form); }
 input[type=text], input[type=password] {
-  flex: 1 1 260px; min-width: 0; height: 44px; padding: 0 14px;
+  flex: 1 1 260px; min-width: 0; height: 38px; padding: 0 13px;
   border: 1px solid #dedede; border-radius: var(--r-md); color: var(--text);
-  background: #fff; outline: none; font: inherit; font-size: 14px;
+  background: #fff; outline: none; font: inherit; font-size: 13.5px;
   transition: border-color .15s, box-shadow .15s;
 }
 input[type=text]::placeholder, input[type=password]::placeholder { color: #aaa; }
 input[type=text]:focus, input[type=password]:focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(17, 17, 17, .07); }
 button {
-  height: 44px; padding: 0 20px; border: 1px solid var(--ink); border-radius: var(--r-md); cursor: pointer;
-  background: var(--ink); color: #fff; font: inherit; font-size: 14px; font-weight: 600;
+  height: 38px; padding: 0 18px; border: 1px solid var(--ink); border-radius: var(--r-md); cursor: pointer;
+  background: var(--ink); color: #fff; font: inherit; font-size: 13.5px; font-weight: 600;
   transition: background .15s, border-color .15s, transform .1s;
 }
 button:hover { background: var(--ink-hover); border-color: var(--ink-hover); }
@@ -107,7 +107,7 @@ a.btn.solid:hover { background: var(--ink-hover); border-color: var(--ink-hover)
 .role-tag.admin { background: #111; color: #fff; }
 .tabs { display: flex; gap: 6px; margin-bottom: 20px; }
 .tabs button {
-  flex: 1; background: #fff; color: var(--muted); border: 1px solid var(--line); height: 40px;
+  flex: 1; background: #fff; color: var(--muted); border: 1px solid var(--line); height: 36px;
 }
 .tabs button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
 .auth-form { display: flex; flex-direction: column; gap: 12px; }
