@@ -236,6 +236,48 @@ export async function isInstalled(env) {
   }
 }
 
+/* ------------------------------ 初始化密钥 ------------------------------ */
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  let out = "";
+  for (const b of new Uint8Array(buf)) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * 校验初始化验证密钥。
+ * 仓库里只保存摘要（wrangler.jsonc → vars.INIT_KEY_SHA256），这里对页面输入做同样的
+ * SHA-256 再做定长比较，明文密钥不落代码库、不入日志。
+ * 通过返回 null，否则返回应当直接回给客户端的 Response。
+ */
+async function checkInitKey(env, rawKey) {
+  const expected = String((env && env.INIT_KEY_SHA256) || "")
+    .trim()
+    .toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) {
+    return json(
+      {
+        ok: false,
+        error:
+          "服务端未配置初始化密钥（INIT_KEY_SHA256），请在 wrangler.jsonc 的 vars 中填写其 SHA-256 摘要后重新部署",
+      },
+      500
+    );
+  }
+  const key = typeof rawKey === "string" ? rawKey.trim() : "";
+  if (!key) return json({ ok: false, error: "请填写验证密钥" }, 400);
+
+  const actual = await sha256Hex(key);
+  if (!timingSafeEqual(actual, expected)) {
+    return json({ ok: false, error: "验证密钥不正确" }, 403);
+  }
+  return null;
+}
+
 async function handleInit(request, env) {
   let body;
   try {
@@ -246,6 +288,14 @@ async function handleInit(request, env) {
   const username = (body.username || "").trim();
   const password = body.password || "";
 
+  if (await isInstalled(env)) {
+    return json({ ok: false, error: "系统已初始化，请直接登录" }, 409);
+  }
+
+  // 验证密钥：只有部署者知道明文，仓库里只有它的 SHA-256 摘要
+  const keyError = await checkInitKey(env, body.initKey);
+  if (keyError) return keyError;
+
   if (!validUsername(username)) {
     return json(
       { ok: false, error: "用户名需为 3-32 位字母、数字、点、下划线或连字符" },
@@ -254,9 +304,6 @@ async function handleInit(request, env) {
   }
   if (typeof password !== "string" || password.length < 8) {
     return json({ ok: false, error: "密码至少 8 位" }, 400);
-  }
-  if (await isInstalled(env)) {
-    return json({ ok: false, error: "系统已初始化，请直接登录" }, 409);
   }
 
   // 先抢占初始化标记：并发请求里只有一个能成功，避免被重复初始化

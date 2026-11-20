@@ -12,9 +12,23 @@ const TEST_USER = "tester";
 const TEST_PASS = "password123";
 const ADMIN_USER = "rootadmin";
 const ADMIN_PASS = "adminpass123";
+// 初始化验证密钥：仓库里只有摘要，测试用一把独立的密钥，不能出现线上明文密钥
+const TEST_INIT_KEY = "test-init-key-2026";
+const TEST_INIT_KEY_SHA256 =
+	"40eef652bf91ee7b6e6884faed4b2420ed00d758321dd90f17fe3ac37d6364df";
 
 // 初始化阶段观察到的状态，用于断言「首次部署」的表现
-const preInit = { installed: null, homeStatus: 0, homeLocation: "", registerStatus: 0, initRole: "" };
+const preInit = {
+	installed: null,
+	homeStatus: 0,
+	homeLocation: "",
+	registerStatus: 0,
+	initRole: "",
+	missingKeyStatus: 0,
+	wrongKeyStatus: 0,
+	installedAfterReject: false,
+	noConfigStatus: 0,
+};
 
 async function raw(request) {
 	const ctx = createExecutionContext();
@@ -29,6 +43,20 @@ function jsonRequest(path, payload) {
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(payload),
 	});
+}
+
+/** 用一份临时 env 跑请求（未列出的绑定回落到真实 env），用于验证配置项差异 */
+async function rawWith(request, customEnv) {
+	const ctx = createExecutionContext();
+	const merged = new Proxy(customEnv, {
+		get(target, prop) {
+			if (prop in target) return target[prop];
+			return env[prop];
+		},
+	});
+	const response = await worker.fetch(request, merged, ctx);
+	await waitOnExecutionContext(ctx);
+	return response;
 }
 
 beforeAll(async () => {
@@ -48,13 +76,51 @@ beforeAll(async () => {
 		await raw(jsonRequest("/api/register", { username: TEST_USER, password: TEST_PASS }))
 	).status;
 
-	// 2) 初始化：创建第一个管理员
-	const initRes = await raw(
-		jsonRequest("/api/init", { username: ADMIN_USER, password: ADMIN_PASS })
+	// 2) 验证密钥不通过时不能建管理员（且不能把初始化标记占掉）
+	// 测试环境只认测试密钥的摘要，线上明文密钥不会出现在仓库里
+	const testEnv = { INIT_KEY_SHA256: TEST_INIT_KEY_SHA256 };
+	preInit.missingKeyStatus = (
+		await rawWith(
+			jsonRequest("/api/init", { username: ADMIN_USER, password: ADMIN_PASS }),
+			testEnv
+		)
+	).status;
+	preInit.wrongKeyStatus = (
+		await rawWith(
+			jsonRequest("/api/init", {
+				initKey: "not-the-key",
+				username: ADMIN_USER,
+				password: ADMIN_PASS,
+			}),
+			testEnv
+		)
+	).status;
+	preInit.installedAfterReject = (
+		await (await raw(new Request("http://example.com/api/init-status"))).json()
+	).installed;
+	preInit.noConfigStatus = (
+		await rawWith(
+			jsonRequest("/api/init", {
+				initKey: TEST_INIT_KEY,
+				username: ADMIN_USER,
+				password: ADMIN_PASS,
+			}),
+			{ INIT_KEY_SHA256: "" }
+		)
+	).status;
+
+	// 3) 带正确密钥完成初始化：创建第一个管理员
+	const initRes = await rawWith(
+		jsonRequest("/api/init", {
+			initKey: TEST_INIT_KEY,
+			username: ADMIN_USER,
+			password: ADMIN_PASS,
+		}),
+		testEnv
 	);
 	preInit.initRole = (await initRes.json()).user.role;
 
-	// 3) 注册普通用户并登录，供代理类用例使用
+	// 4) 注册普通用户并登录，供代理类用例使用
 	await raw(jsonRequest("/api/register", { username: TEST_USER, password: TEST_PASS }));
 	const res = await raw(jsonRequest("/api/login", { username: TEST_USER, password: TEST_PASS }));
 	sessionCookie = (res.headers.get("set-cookie") || "").split(";")[0];
@@ -102,6 +168,26 @@ describe("系统初始化", () => {
 
 	it("初始化创建的第一个账号是管理员", () => {
 		expect(preInit.initRole).toBe("admin");
+	});
+
+	it("缺少验证密钥时拒绝初始化", () => {
+		expect(preInit.missingKeyStatus).toBe(400);
+	});
+
+	it("验证密钥错误时拒绝初始化", () => {
+		expect(preInit.wrongKeyStatus).toBe(403);
+	});
+
+	it("密钥校验失败不会占用初始化标记", () => {
+		expect(preInit.installedAfterReject).toBe(false);
+	});
+
+	it("服务端没配置密钥摘要时拒绝初始化", () => {
+		expect(preInit.noConfigStatus).toBe(500);
+	});
+
+	it("wrangler.jsonc 里配置了合法的验证密钥摘要", () => {
+		expect(env.INIT_KEY_SHA256).toMatch(/^[0-9a-f]{64}$/);
 	});
 
 	it("初始化后 /init.html 不再可访问", async () => {

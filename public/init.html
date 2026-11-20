@@ -25,9 +25,13 @@
     <h2>设置管理员</h2>
     <p class="notice">
       这个页面只在系统尚未初始化时出现，成功创建管理员后<b>自动失效</b>。<br>
-      如果你不是这套服务的部署者，请不要继续操作。
+      创建管理员需要先输入部署时配置的<b>验证密钥</b>；如果你不是这套服务的部署者，请不要继续操作。
     </p>
     <div class="auth-form">
+      <div class="row-field">
+        <label for="initKey">验证密钥</label>
+        <input type="password" id="initKey" autocomplete="off" spellcheck="false" placeholder="部署时配置的初始化验证密钥">
+      </div>
       <div class="row-field">
         <label for="initUser">管理员用户名</label>
         <input type="text" id="initUser" value="admin" autocomplete="username" spellcheck="false" placeholder="3-32 位字母、数字、点、下划线或连字符">
@@ -63,10 +67,12 @@
   }
 
   function submit() {
+    var initKey = $('initKey').value.trim();
     var username = $('initUser').value.trim();
     var password = $('initPass').value;
     var confirm = $('initPass2').value;
 
+    if (!initKey) return setMsg('请填写验证密钥', true);
     if (!username) return setMsg('请填写管理员用户名', true);
     if (password.length < 8) return setMsg('密码至少 8 位', true);
     if (password !== confirm) return setMsg('两次输入的密码不一致', true);
@@ -75,20 +81,23 @@
     CF.api('/api/init', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username: username, password: password })
+      body: JSON.stringify({ initKey: initKey, username: username, password: password })
     }).then(function (out) {
       if (!out.ok) throw new Error(out.data.error || '初始化失败');
+      $('initKey').value = '';
       $('initPass').value = '';
       $('initPass2').value = '';
       setMsg('初始化完成，正在进入主页面…', false);
       location.replace('/');
     }).catch(function (e) {
-      setMsg(e.message, true);
       done();
+      setMsg(e.message, true);
+      if (/验证密钥/.test(e.message)) $('initKey').focus();
     });
   }
 
   $('initSubmit').addEventListener('click', submit);
+  $('initKey').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('initUser').focus(); });
   $('initPass2').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
 
   // 已初始化就直接回首页（服务端也会拦，这里是体验层兜底）
@@ -96,7 +105,7 @@
     if (out.ok && out.data.installed) return location.replace('/');
     $('loading').hidden = true;
     $('initCard').hidden = false;
-    $('initUser').focus();
+    $('initKey').focus();
   });
 })();
 </script>
