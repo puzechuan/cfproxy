@@ -7,7 +7,9 @@
  *    因此「禁用账号 / 调整角色」立即生效，不必等 Cookie 过期。
  * 3. 签名密钥在首次使用时生成并落入 D1 settings 表，模块级缓存；
  *    INSERT OR IGNORE 保证多 isolate 并发时共享同一把密钥。
- * 4. 服务端配置的管理员用户名必须用邀请码注册，别人无法抢注。
+ * 4. 首次部署时系统处于「未初始化」状态，只有 /init.html 可访问；
+ *    初始化接口在「无管理员且未初始化」时可用一次，用于创建第一个管理员账号，
+ *    初始化完成后标记写入 settings，之后该接口永久失效，不存在抢注窗口。
  */
 
 const COOKIE = "cfproxy_session";
@@ -214,21 +216,27 @@ export async function getUser(request, env) {
   return user;
 }
 
-/* ------------------------------ 注册 / 登录 ----------------------------- */
+/* ------------------------------ 初始化状态 ------------------------------ */
 
-function validUsername(username) {
-  return /^[A-Za-z0-9_.-]{3,32}$/.test(username || "");
+/**
+ * 系统是否已完成初始化（第一个管理员已创建）。
+ * 用 settings 里的标记判断，而不是「用户表是否为空」——
+ * 否则管理员被误删时初始化入口会重新打开，等于留了个后门。
+ */
+export async function isInstalled(env) {
+  if (!env || !env.DB) return false;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT value FROM settings WHERE key = 'installed'"
+    ).first();
+    return !!row;
+  } catch (e) {
+    // 表还没建（未执行迁移）时按未初始化处理，页面会引导去初始化页
+    return false;
+  }
 }
 
-function isAdminName(env, username) {
-  const list = (env.ADMIN_USERS || "")
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  return list.includes(username.toLowerCase());
-}
-
-async function handleRegister(request, env) {
+async function handleInit(request, env) {
   let body;
   try {
     body = await request.json();
@@ -247,17 +255,90 @@ async function handleRegister(request, env) {
   if (typeof password !== "string" || password.length < 8) {
     return json({ ok: false, error: "密码至少 8 位" }, 400);
   }
+  if (await isInstalled(env)) {
+    return json({ ok: false, error: "系统已初始化，请直接登录" }, 409);
+  }
 
-  const admin = isAdminName(env, username);
-  if (admin) {
-    // 管理员用户名需邀请码，防止被他人抢注
-    const code = env.ADMIN_CODE;
-    if (!code || body.inviteCode !== code) {
-      return json(
-        { ok: false, error: "该用户名为管理员保留名，需要有效的管理员邀请码" },
-        403
-      );
-    }
+  // 先抢占初始化标记：并发请求里只有一个能成功，避免被重复初始化
+  const marker = new Date().toISOString();
+  let claim;
+  try {
+    claim = await env.DB.prepare(
+      "INSERT OR IGNORE INTO settings(key, value) VALUES('installed', ?)"
+    )
+      .bind(marker)
+      .run();
+  } catch (e) {
+    return json(
+      { ok: false, error: "数据库未就绪，请先执行 D1 迁移（见 migrations/）" },
+      500
+    );
+  }
+  if (!claim.meta || claim.meta.changes !== 1) {
+    return json({ ok: false, error: "系统已初始化，请直接登录" }, 409);
+  }
+
+  try {
+    const saltBytes = crypto.getRandomValues(new Uint8Array(16));
+    const salt = b64urlEncode(saltBytes);
+    const passHash = await deriveHash(password, saltBytes);
+    await env.DB.prepare(
+      "INSERT INTO users(username, pass_hash, salt, role, disabled, created_at) VALUES(?, ?, ?, 'admin', 0, ?)"
+    )
+      .bind(username, passHash, salt, marker)
+      .run();
+  } catch (e) {
+    // 建管理员失败就把标记撤掉，允许重试
+    await env.DB.prepare(
+      "DELETE FROM settings WHERE key = 'installed' AND value = ?"
+    )
+      .bind(marker)
+      .run()
+      .catch(() => {});
+    return json({ ok: false, error: "初始化失败，请稍后重试" }, 500);
+  }
+
+  const user = await env.DB.prepare(
+    "SELECT id, username, role FROM users WHERE username = ? COLLATE NOCASE"
+  )
+    .bind(username)
+    .first();
+  const secret = await getSecret(env);
+  const token = await signSession(user, secret);
+  return json(
+    { ok: true, user: { username: user.username, role: user.role } },
+    200,
+    { "Set-Cookie": sessionCookie(token, request) }
+  );
+}
+
+/* ------------------------------ 注册 / 登录 ----------------------------- */
+
+function validUsername(username) {
+  return /^[A-Za-z0-9_.-]{3,32}$/.test(username || "");
+}
+
+async function handleRegister(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ ok: false, error: "请求格式错误" }, 400);
+  }
+  const username = (body.username || "").trim();
+  const password = body.password || "";
+
+  if (!(await isInstalled(env))) {
+    return json({ ok: false, error: "系统尚未初始化，请先完成初始化" }, 403);
+  }
+  if (!validUsername(username)) {
+    return json(
+      { ok: false, error: "用户名需为 3-32 位字母、数字、点、下划线或连字符" },
+      400
+    );
+  }
+  if (typeof password !== "string" || password.length < 8) {
+    return json({ ok: false, error: "密码至少 8 位" }, 400);
   }
 
   const exists = await env.DB.prepare(
@@ -272,9 +353,9 @@ async function handleRegister(request, env) {
   const passHash = await deriveHash(password, saltBytes);
   const now = new Date().toISOString();
   await env.DB.prepare(
-    "INSERT INTO users(username, pass_hash, salt, role, disabled, created_at) VALUES(?, ?, ?, ?, 0, ?)"
+    "INSERT INTO users(username, pass_hash, salt, role, disabled, created_at) VALUES(?, ?, ?, 'user', 0, ?)"
   )
-    .bind(username, passHash, salt, admin ? "admin" : "user", now)
+    .bind(username, passHash, salt, now)
     .run();
 
   const user = await env.DB.prepare(
@@ -299,6 +380,10 @@ async function handleLogin(request, env) {
     return json({ ok: false, error: "请求格式错误" }, 400);
   }
   const username = (body.username || "").trim();
+
+  if (!(await isInstalled(env))) {
+    return json({ ok: false, error: "系统尚未初始化，请先完成初始化" }, 403);
+  }
 
   const user = await env.DB.prepare(
     "SELECT id, username, pass_hash, salt, role, disabled FROM users WHERE username = ? COLLATE NOCASE"
@@ -410,6 +495,12 @@ async function handleAdminReset(request, env) {
  */
 export async function handleAuthApi(request, env, path) {
   const method = request.method;
+  if (path === "/api/init" && method === "POST") {
+    return handleInit(request, env);
+  }
+  if (path === "/api/init-status") {
+    return json({ ok: true, installed: await isInstalled(env) });
+  }
   if (path === "/api/register" && method === "POST") {
     return handleRegister(request, env);
   }

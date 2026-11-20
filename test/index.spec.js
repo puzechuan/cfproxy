@@ -10,30 +10,53 @@ afterEach(() => {
 let sessionCookie = "";
 const TEST_USER = "tester";
 const TEST_PASS = "password123";
+const ADMIN_USER = "rootadmin";
+const ADMIN_PASS = "adminpass123";
+
+// 初始化阶段观察到的状态，用于断言「首次部署」的表现
+const preInit = { installed: null, homeStatus: 0, homeLocation: "", registerStatus: 0, initRole: "" };
+
+async function raw(request) {
+	const ctx = createExecutionContext();
+	const response = await worker.fetch(request, env, ctx);
+	await waitOnExecutionContext(ctx);
+	return response;
+}
+
+function jsonRequest(path, payload) {
+	return new Request("http://example.com" + path, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(payload),
+	});
+}
 
 beforeAll(async () => {
 	// 测试环境有独立 D1 实例，先确保表结构存在（幂等）
 	await env.DB.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE, pass_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login TEXT)");
 	await env.DB.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+	// 从干净状态开始，保证初始化流程每次都能被完整验证
+	await env.DB.exec("DELETE FROM users");
+	await env.DB.exec("DELETE FROM settings");
 
-	// 注册（已存在则忽略），再登录拿会话 Cookie
-	const reg = new Request("http://example.com/api/register", {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ username: TEST_USER, password: TEST_PASS }),
-	});
-	const rc = createExecutionContext();
-	await worker.fetch(reg, env, rc);
-	await waitOnExecutionContext(rc);
+	// 1) 初始化前：未初始化、首页引导到初始化页、注册不可用
+	preInit.installed = (await (await raw(new Request("http://example.com/api/init-status"))).json()).installed;
+	const home = await raw(new Request("http://example.com/"));
+	preInit.homeStatus = home.status;
+	preInit.homeLocation = home.headers.get("location") || "";
+	preInit.registerStatus = (
+		await raw(jsonRequest("/api/register", { username: TEST_USER, password: TEST_PASS }))
+	).status;
 
-	const login = new Request("http://example.com/api/login", {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ username: TEST_USER, password: TEST_PASS }),
-	});
-	const lc = createExecutionContext();
-	const res = await worker.fetch(login, env, lc);
-	await waitOnExecutionContext(lc);
+	// 2) 初始化：创建第一个管理员
+	const initRes = await raw(
+		jsonRequest("/api/init", { username: ADMIN_USER, password: ADMIN_PASS })
+	);
+	preInit.initRole = (await initRes.json()).user.role;
+
+	// 3) 注册普通用户并登录，供代理类用例使用
+	await raw(jsonRequest("/api/register", { username: TEST_USER, password: TEST_PASS }));
+	const res = await raw(jsonRequest("/api/login", { username: TEST_USER, password: TEST_PASS }));
 	sessionCookie = (res.headers.get("set-cookie") || "").split(";")[0];
 });
 
@@ -62,6 +85,44 @@ function expectPageServed(response, file) {
 	expect(response.status).toBe(200);
 	expect(response.headers.get("content-type")).toContain("text/html");
 }
+
+describe("系统初始化", () => {
+	it("首次部署时处于未初始化状态", () => {
+		expect(preInit.installed).toBe(false);
+	});
+
+	it("未初始化时任何页面都引导到初始化页", () => {
+		expect(preInit.homeStatus).toBe(302);
+		expect(preInit.homeLocation).toContain("/init.html");
+	});
+
+	it("未初始化时注册被拒绝", () => {
+		expect(preInit.registerStatus).toBe(403);
+	});
+
+	it("初始化创建的第一个账号是管理员", () => {
+		expect(preInit.initRole).toBe("admin");
+	});
+
+	it("初始化后 /init.html 不再可访问", async () => {
+		const res = await raw(new Request("http://example.com/init.html"));
+		expect(res.status).toBe(302);
+		expect(res.headers.get("location")).toMatch(/\/$/);
+	});
+
+	it("重复初始化返回 409，避免被二次抢占", async () => {
+		const res = await raw(
+			jsonRequest("/api/init", { username: "another", password: "password123" })
+		);
+		expect(res.status).toBe(409);
+		expect((await res.json()).error).toContain("已初始化");
+	});
+
+	it("初始化状态可查询", async () => {
+		const res = await raw(new Request("http://example.com/api/init-status"));
+		expect((await res.json()).installed).toBe(true);
+	});
+});
 
 describe("代理入口", () => {
 	it("/health 返回健康状态", async () => {
@@ -763,48 +824,21 @@ describe("用户系统 · 访问控制", () => {
 });
 
 describe("用户系统 · 管理员", () => {
-	function adminEnv() {
-		return new Proxy({ ADMIN_USERS: "rootadmin", ADMIN_CODE: "join-secret-2026" }, {
-			get(target, prop) {
-				if (prop in target) return target[prop];
-				return env[prop];
-			},
-		});
+	async function api(req) {
+		return worker.fetch(req, env, createExecutionContext());
 	}
 
-	async function api(req, e = env) {
-		return worker.fetch(req, e, createExecutionContext());
+	/** 用初始化时创建的管理员登录，返回可直接带的 Cookie */
+	async function adminSessionCookie() {
+		const res = await api(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: ADMIN_USER, password: ADMIN_PASS }),
+			})
+		);
+		return (res.headers.get("set-cookie") || "").split(";")[0];
 	}
-
-	it("管理员用户名无邀请码时注册被拒绝（防抢注）", async () => {
-		const res = await api(
-			new Request("http://example.com/api/register", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
-			}),
-			adminEnv()
-		);
-		expect(res.status).toBe(403);
-	});
-
-	it("凭正确邀请码注册管理员成功，角色为 admin", async () => {
-		const res = await api(
-			new Request("http://example.com/api/register", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					username: "rootadmin",
-					password: "password123",
-					inviteCode: "join-secret-2026",
-				}),
-			}),
-			adminEnv()
-		);
-		expect(res.status).toBe(200);
-		const data = await res.json();
-		expect(data.user.role).toBe("admin");
-	});
 
 	it("普通用户访问管理接口被拒绝（403）", async () => {
 		const res = await api(withAuth(new Request("http://example.com/api/admin/users")));
@@ -817,17 +851,8 @@ describe("用户系统 · 管理员", () => {
 	});
 
 	it("管理员可列出用户、禁用账号，禁用立即生效", async () => {
-		const ae = adminEnv();
-		// 管理员登录
-		const login = await api(
-			new Request("http://example.com/api/login", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
-			}),
-			ae
-		);
-		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
 		const authed = (path, init) => {
 			const req = new Request("http://example.com" + path, init);
 			req.headers.set("cookie", adminCookie);
@@ -871,16 +896,8 @@ describe("用户系统 · 管理员", () => {
 	});
 
 	it("管理员可打开用户管理页", async () => {
-		const ae = adminEnv();
-		const login = await api(
-			new Request("http://example.com/api/login", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
-			}),
-			ae
-		);
-		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
 		const req = new Request("http://example.com/admin.html");
 		req.headers.set("cookie", adminCookie);
 
@@ -889,16 +906,8 @@ describe("用户系统 · 管理员", () => {
 	});
 
 	it("管理员可重置用户密码，新密码可登录", async () => {
-		const ae = adminEnv();
-		const login = await api(
-			new Request("http://example.com/api/login", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
-			}),
-			ae
-		);
-		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
 		const list = await api(
 			(() => { const r = new Request("http://example.com/api/admin/users"); r.headers.set("cookie", adminCookie); return r; })(),
 			ae

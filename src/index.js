@@ -16,13 +16,13 @@
  * 7. 用户系统：仅注册用户可访问代理；D1 存用户，HMAC 签名会话，服务端可禁用。
  */
 
-import { handleAuthApi, getUser } from "./auth";
+import { handleAuthApi, getUser, isInstalled } from "./auth";
 
 // 页面拆分为三个独立 HTML（public/login.html、public/index.html、public/admin.html），
 // 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.9";
+const BUILD_ID = "2026-11-20.10";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -697,13 +697,24 @@ async function handleRequest(request, env, ctx) {
   }
 
   // ---- 页面路由 ----
-  // 登录页公开；主页面与用户管理页在服务端校验身份，未登录/非管理员直接重定向。
+  // 首次部署时只有初始化页可访问；建好管理员后，主页面/管理页在服务端校验身份。
   // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
   const isPage =
-    path === "/" || path === "/index.html" || path === "/login.html" || path === "/admin.html";
-  const fromLegacyLink = url.searchParams.has("url") && path !== "/login.html";
+    path === "/" ||
+    path === "/index.html" ||
+    path === "/login.html" ||
+    path === "/admin.html" ||
+    path === "/init.html";
+  const fromLegacyLink =
+    url.searchParams.has("url") && path !== "/login.html" && path !== "/init.html";
 
   if (isPage && !fromLegacyLink) {
+    if (!(await isInstalled(env))) {
+      if (path === "/init.html") return pageResponse(request, env, "/init.html");
+      return redirect(base + "/init.html");
+    }
+    if (path === "/init.html") return redirect(base + "/");
+
     const pageUser = await getUser(request, env);
     if (path === "/login.html") {
       if (pageUser) return redirect(base + "/");

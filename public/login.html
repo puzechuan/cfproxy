@@ -36,10 +36,6 @@
         <label for="authPass">密码</label>
         <input type="password" id="authPass" autocomplete="current-password" placeholder="至少 8 位">
       </div>
-      <div class="row-field" id="inviteField" hidden>
-        <label for="authInvite">管理员邀请码（仅配置的管理员用户名需要）</label>
-        <input type="text" id="authInvite" spellcheck="false" placeholder="管理员邀请码">
-      </div>
       <button id="authSubmit">登录</button>
       <p class="msg" id="authMsg"></p>
       <p class="auth-hint">还没有账号？切换到「注册」用用户名和密码即可创建。</p>
@@ -72,7 +68,6 @@
     $('authTitle').textContent = isLogin ? '登录后使用' : '注册新账号';
     $('authSubmit').textContent = isLogin ? '登录' : '注册';
     $('authPass').autocomplete = isLogin ? 'current-password' : 'new-password';
-    $('inviteField').hidden = isLogin;
     setMsg('', false);
   }
 
@@ -80,14 +75,12 @@
     var username = $('authUser').value.trim();
     var password = $('authPass').value;
     if (!username || !password) return setMsg('请填写用户名和密码', true);
-    var payload = { username: username, password: password };
-    if (mode === 'register' && $('authInvite').value) payload.inviteCode = $('authInvite').value;
 
     var done = CF.busy($('authSubmit'), mode === 'login' ? '登录中…' : '注册中…');
     CF.api('/api/' + (mode === 'login' ? 'login' : 'register'), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ username: username, password: password })
     }).then(function (out) {
       if (!out.ok) throw new Error(out.data.error || '操作失败');
       setMsg(mode === 'login' ? '登录成功' : '注册成功', false);
@@ -104,7 +97,7 @@
   $('authPass').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
   $('authUser').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('authPass').focus(); });
 
-  // 已登录就不必再看登录页
+  // 已登录就不必再看登录页；未初始化则交给服务端引导到初始化页
   CF.me().then(function (user) {
     if (user) return location.replace(next);
     $('loading').hidden = true;
