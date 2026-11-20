@@ -52,14 +52,28 @@
         所以必须在命令行跑。下面两段脚本做的事一样——对每个候选 IP 测一次 TCP 握手（端口 443），
         时延越小越好，超时的直接淘汰。
       </p>
-      <p class="prose">Windows（PowerShell，系统自带，无需装任何东西）：</p>
+      <p class="prose">Windows —— 下载脚本，双击运行，不用改任何设置：</p>
+      <div class="field" style="max-width:var(--form);margin-bottom:14px">
+        <button id="dlBatBtn">下载测速脚本（.bat）</button>
+        <span class="msg" id="batMsg" style="margin:0;align-self:center"></span>
+      </div>
+      <p class="prose">
+        脚本只做一件事：对本页列出的每个 IP 测一次 443 端口握手，按快慢排序取前 5，然后停下来等你按键。
+        它不写注册表、不改任何设置、不需要管理员权限，测完关掉窗口就行。
+      </p>
+      <p class="prose">
+        下载时 Chrome 可能提示「不常下载，可能存在危险」，选<b>保留</b>；
+        第一次运行可能被 SmartScreen 拦一下（「Windows 已保护你的电脑」）——点<b>更多信息</b> → <b>仍要运行</b>。
+        这两处都是因为它是从网上下载的 .bat 文件，不是脚本本身有问题。
+      </p>
+      <p class="prose" style="margin-top:16px">不想下载文件的话，也可以把这行命令复制到 PowerShell 里直接跑：</p>
       <div class="code-wrap">
-        <button class="ghost small copy" data-copy="psCode">复制</button>
+        <div class="code-bar"><button class="ghost small copy" data-copy="psCode">复制</button></div>
         <pre class="code" id="psCode"></pre>
       </div>
       <p class="prose" style="margin-top:16px">macOS / Linux（bash + curl）：</p>
       <div class="code-wrap">
-        <button class="ghost small copy" data-copy="shCode">复制</button>
+        <div class="code-bar"><button class="ghost small copy" data-copy="shCode">复制</button></div>
         <pre class="code" id="shCode"></pre>
       </div>
       <p class="msg" id="copyMsg"></p>
@@ -92,12 +106,12 @@
       <div id="hostsOut" hidden>
         <label>粘贴到 hosts 文件末尾</label>
         <div class="code-wrap">
-          <button class="ghost small copy" data-copy="hostsLine">复制</button>
+          <div class="code-bar"><button class="ghost small copy" data-copy="hostsLine">复制</button></div>
           <pre class="code" id="hostsLine"></pre>
         </div>
         <label style="margin-top:16px">保存后验证（应返回 ok: true 与当前 build 号）</label>
         <div class="code-wrap">
-          <button class="ghost small copy" data-copy="verifyCode">复制</button>
+          <div class="code-bar"><button class="ghost small copy" data-copy="verifyCode">复制</button></div>
           <pre class="code" id="verifyCode"></pre>
         </div>
       </div>
@@ -234,6 +248,72 @@
     ].join('\n');
   }
 
+  /**
+   * 生成可双击运行的 .bat。
+   * 刻意全部使用 ASCII：批处理里的中文在不同代码页下极易变成乱码，
+   * 用户看到一堆方块会以为脚本坏了。中文说明留在网页上。
+   * .bat 必须用 CRLF 换行，否则 cmd 解析会出问题。
+   */
+  function buildBat() {
+    var ps = "$ErrorActionPreference='SilentlyContinue';"
+      + "$ips=@(" + quotedList() + ");"
+      + "$r=foreach($ip in $ips){"
+      + "$c=New-Object Net.Sockets.TcpClient;"
+      + "$sw=[Diagnostics.Stopwatch]::StartNew();"
+      + "$ok=$false;"
+      + "try{$t=$c.ConnectAsync($ip,443);$ok=$t.Wait(1500)}catch{}"
+      + "finally{$c.Dispose()};"
+      + "if($ok){[pscustomobject]@{IP=$ip;MS=[int]$sw.ElapsedMilliseconds}}"
+      + "};"
+      + "Write-Host '';"
+      + "if($r){"
+      + "Write-Host '  Fastest 5, lower is better:' -ForegroundColor Green;"
+      + "Write-Host '';"
+      + "$r|Sort-Object MS|Select-Object -First 5|Format-Table -AutoSize"
+      + "}else{"
+      + "Write-Host '  No reachable IP found. Direct access to Cloudflare may be blocked.' -ForegroundColor Red"
+      + "}";
+
+    var lines = [
+      '@echo off',
+      'setlocal',
+      'title Cloudflare edge IP test',
+      'echo.',
+      'echo   Cloudflare edge IP test',
+      'echo   Target: ' + HOST,
+      'echo   Candidate IPs: ' + IPS.length,
+      'echo.',
+      'echo   Measuring TCP handshake to port 443 on each IP.',
+      'echo   This takes 1-2 minutes. Keep this window open.',
+      'echo.',
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command "' + ps + '"',
+      'echo.',
+      'echo   Done. Use the fastest IP listed above.',
+      'echo.',
+      'echo      ^[that IP^]  ' + HOST,
+      'echo.',
+      'echo   hosts file : C:\\Windows\\System32\\drivers\\etc\\hosts',
+      'echo   Open it with Notepad running as Administrator, add the line',
+      'echo   above, save, then run:  ipconfig /flushdns',
+      'echo.',
+      'pause'
+    ];
+    return lines.join('\r\n') + '\r\n';
+  }
+
+  function downloadBat() {
+    var blob = new Blob([buildBat()], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'cf-ip-test.bat';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    flash($('batMsg'), '已下载 cf-ip-test.bat', false);
+  }
+
   function render() {
     $('ipCount').textContent = String(IPS.length);
     $('psCode').textContent = psScript();
@@ -319,6 +399,8 @@
       flash($('gridMsg'), ok ? '已复制 ' + IPS.length + ' 个 IP' : '复制失败，请手动选中', !ok);
     });
   });
+
+  $('dlBatBtn').addEventListener('click', downloadBat);
 
   $('genBtn').addEventListener('click', generate);
   $('pickIp').addEventListener('keydown', function (e) {
