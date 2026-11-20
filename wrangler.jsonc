@@ -11,11 +11,14 @@
 		"global_fetch_strictly_public"
 	],
 	"assets": {
-		// 静态页面目录：/init.html 首次初始化、/login.html 登录注册、/index.html 主页面、/admin.html 用户管理
+		// 静态页面目录：/init.html 首次初始化、/login.html 登录注册、/index.html 主页面
+		// 管理页实体是 admin.html，但对外地址只有 /admin，/admin.html 由 Worker 302 过去
 		"directory": "./public",
 		"binding": "ASSETS",
-		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件
-		"run_worker_first": ["/", "/index.html", "/login.html", "/admin.html", "/init.html"]
+		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件。
+		// "/admin.html" 必须留着：它不在名单里，静态资源绑定会直接把这个文件吐出去，
+		// 绕过 Worker 里的登录与管理员校验；"/admin" 与 "/admin/" 则是对外地址本身。
+		"run_worker_first": ["/", "/index.html", "/login.html", "/admin", "/admin/", "/admin.html", "/init.html"]
 	},
 	"d1_databases": [
 		{

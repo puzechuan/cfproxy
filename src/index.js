@@ -27,7 +27,7 @@ import {
 // 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.20";
+const BUILD_ID = "2026-11-20.21";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -805,11 +805,20 @@ async function handleRequest(request, env, ctx) {
   // ---- 页面路由 ----
   // 首次部署时只有初始化页可访问；建好管理员后，主页面/管理页在服务端校验身份。
   // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
+  //
+  // 管理页对外只暴露 /admin。页面实体文件仍是 public/admin.html，但该文件名不再作为
+  // 访问地址：直接访问 /admin.html 或 /admin/ 一律 302 到 /admin，旧书签不会 404。
+  // wrangler.jsonc 的 run_worker_first 里必须保留 "/admin.html"，否则静态资源绑定会
+  // 直接把这个文件吐出去，绕过下面的登录与管理员校验。
+  if (path === "/admin.html" || path === "/admin/") {
+    return redirect(base + "/admin");
+  }
+
   const isPage =
     path === "/" ||
     path === "/index.html" ||
     path === "/login.html" ||
-    path === "/admin.html" ||
+    path === "/admin" ||
     path === "/ip.html" ||
     path === "/init.html";
   const fromLegacyLink =
@@ -835,10 +844,11 @@ async function handleRequest(request, env, ctx) {
           : encodeURIComponent(path);
       return redirect(base + "/login.html?next=" + next);
     }
-    if (path === "/admin.html" && pageUser.role !== "admin") {
+    if (path === "/admin" && pageUser.role !== "admin") {
       return redirect(base + "/");
     }
-    return pageResponse(request, env, path);
+    // /admin 只是个对外地址，实际回读的静态文件仍是 admin.html
+    return pageResponse(request, env, path === "/admin" ? "/admin.html" : path);
   }
 
   // 其余一切请求（预热接口 + 代理访问）都必须登录。

@@ -181,7 +181,7 @@
 
   // 双重校验：未登录回登录页，非管理员回主页面
   CF.me().then(function (user) {
-    if (!user) return CF.toLogin('/admin.html');
+    if (!user) return CF.toLogin('/admin');
     if (user.role !== 'admin') return location.replace('/');
     currentUser = user;
     $('who').innerHTML = '你好，<b></b> <span class="role-tag admin">管理员</span>';

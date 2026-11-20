@@ -963,18 +963,30 @@ describe("用户系统 · 访问控制", () => {
 
 	it("未登录访问用户管理页跳转登录页并记住原地址", async () => {
 		const res = await worker.fetch(
-			new Request("http://example.com/admin.html"),
+			new Request("http://example.com/admin"),
 			env,
 			createExecutionContext()
 		);
 		expect(res.status).toBe(302);
 		const location = res.headers.get("location");
 		expect(location).toContain("/login.html");
-		expect(location).toContain("%2Fadmin.html");
+		expect(location).toContain("%2Fadmin");
+	});
+
+	it("管理页只对外暴露 /admin，admin.html 与 admin/ 一律跳过去", async () => {
+		for (const path of ["/admin.html", "/admin/"]) {
+			const res = await worker.fetch(
+				new Request("http://example.com" + path),
+				env,
+				createExecutionContext()
+			);
+			expect(res.status).toBe(302);
+			expect(new URL(res.headers.get("location")).pathname).toBe("/admin");
+		}
 	});
 
 	it("普通用户访问用户管理页被送回首页", async () => {
-		const res = await call(new Request("http://example.com/admin.html"));
+		const res = await call(new Request("http://example.com/admin"));
 		expect(res.status).toBe(302);
 		expect(res.headers.get("location")).toMatch(/\/$/);
 	});
@@ -1140,11 +1152,13 @@ describe("用户系统 · 管理员", () => {
 	it("管理员可打开用户管理页", async () => {
 		const ae = env;
 		const adminCookie = await adminSessionCookie();
-		const req = new Request("http://example.com/admin.html");
+		const req = new Request("http://example.com/admin");
 		req.headers.set("cookie", adminCookie);
 
 		const res = await api(req, ae);
-		expectPageServed(res, "admin.html");
+		// 地址是 /admin，回读的静态文件仍是 admin.html
+		expect(res.status).toBe(200);
+		expect(res.headers.get("content-type")).toContain("text/html");
 	});
 
 	it("管理员可重置用户密码，新密码可登录", async () => {
