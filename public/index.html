@@ -124,6 +124,7 @@
         <label for="result">加速后的链接（首次下载建议先点「预热缓存」）</label>
         <div class="row">
           <input type="text" id="result" readonly>
+          <button id="jumpBtn">一键跳转</button>
           <button class="ghost" id="copyBtn">复制</button>
           <button class="ghost" id="warmBtn">预热缓存</button>
         </div>
@@ -249,6 +250,12 @@
     } else { fallback(); done(); }
   }
 
+  function jump() {
+    var url = $('result').value.trim();
+    if (!url || !currentTarget) return setMsg('请先生成加速链接', true);
+    window.open(url, '_blank', 'noopener');
+  }
+
   function isDownload(url) {
     try {
       var u = new URL(url);
@@ -290,6 +297,7 @@
 
   $('convertBtn').addEventListener('click', render);
   sourceInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') render(); });
+  $('jumpBtn').addEventListener('click', function () { jump(); });
   $('copyBtn').addEventListener('click', function () { copy($('result').value, this); });
   $('warmBtn').addEventListener('click', function () { warmCache(this); });
   $('copyCloneBtn').addEventListener('click', function () { copy($('clone').value, this); });
