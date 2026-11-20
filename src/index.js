@@ -16,13 +16,18 @@
  * 7. 用户系统：仅注册用户可访问代理；D1 存用户，HMAC 签名会话，服务端可禁用。
  */
 
-import { handleAuthApi, getUser, isInstalled } from "./auth";
+import {
+  handleAuthApi,
+  getUser,
+  getUserForProxy,
+  isInstalled,
+} from "./auth";
 
 // 页面拆分为三个独立 HTML（public/login.html、public/index.html、public/admin.html），
 // 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.14";
+const BUILD_ID = "2026-11-20.15";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -801,8 +806,9 @@ async function handleRequest(request, env, ctx) {
     return pageResponse(request, env, path);
   }
 
-  // 其余一切请求（预热接口 + 代理访问）都必须登录
-  const user = await getUser(request, env);
+  // 其余一切请求（预热接口 + 代理访问）都必须登录。
+  // 这里用带 isolate 缓存的版本：分段下载会高频走进来，不能每个请求都查一次 D1。
+  const user = await getUserForProxy(request, env);
   if (!user) {
     logEvent("auth_required", { path });
     return json(
@@ -924,7 +930,6 @@ async function handleRequest(request, env, ctx) {
   const cacheCf = asset ? assetCacheCf(target, cacheKey) : null;
   let upstream;
   let route = "direct";
-  let upstreamUrl = target.toString();
   try {
     if (asset) {
       // 服务端跟随重定向：浏览器只访问干净链接，缓存键稳定，少一次完整往返。
@@ -956,7 +961,6 @@ async function handleRequest(request, env, ctx) {
           }
           upstream = result;
           route = candidate.name;
-          upstreamUrl = candidate.url;
           break;
         } catch (e) {
           lastError = e;
@@ -1015,15 +1019,10 @@ async function handleRequest(request, env, ctx) {
     return expiredSignatureResponse(base);
   }
 
-  // Range 未命中时后台预热完整对象，后续任意区间都能走边缘缓存
-  if (asset && method === "GET" && request.headers.has("range")) {
-    const cacheStatus = upstream.headers.get("cf-cache-status") || "";
-    if (!/HIT|STALE|REVALIDATED/i.test(cacheStatus)) {
-      ctx.waitUntil(warmAsset(target, cacheCf, upstreamUrl).catch((e) => {
-        logEvent("warm_error", { url: safeUrl(target), error: String(e) });
-      }));
-    }
-  }
+  // 这里曾经在「Range 未命中」时后台预热整份对象，已移除：
+  // 预热和被代理的下载抢同一条出网通道，多线程下载器每个分段 MISS 都会触发一次，
+  // 实测净效果是首次下载速度接近腰斩，而收益（后续区间命中）只在重复下载时才体现。
+  // 预热改为显式操作，由 /__warm 或页面上的「预热缓存」按钮触发。
 
   const response = await buildResponse(upstream, target, base, { asset });
   response.headers.set("X-CFProxy-Route", route);

@@ -216,6 +216,49 @@ export async function getUser(request, env) {
   return user;
 }
 
+/* --------------------- 热路径用户缓存（仅代理放行使用） --------------------- */
+
+/**
+ * 分段下载的每个请求都要过一次登录态校验。如果每次都查 D1，
+ * 一个 16 线程下载器就会产生 16 次数据库往返，全部叠加在首字节延迟上。
+ * 这里在 isolate 内做短 TTL 缓存，只用于「能不能走代理」这一个判断：
+ * /api/* 的账号操作仍然调用 getUser 直查数据库，禁用/改角色立刻生效；
+ * 管理员改动用户时会清空本 isolate 的缓存，其余 isolate 最多滞后 TTL。
+ */
+const PROXY_USER_TTL = 30 * 1000;
+const PROXY_USER_MAX = 2000;
+const proxyUserCache = new Map(); // uid -> { user, exp }
+
+export function invalidateProxyUserCache() {
+  proxyUserCache.clear();
+}
+
+/** 与 getUser 语义一致，但命中缓存时不查库；只给代理放行判断用 */
+export async function getUserForProxy(request, env) {
+  const token = parseCookie(request.headers.get("cookie"), COOKIE);
+  if (!token) return null;
+  const secret = await getSecret(env);
+  const payload = await verifySession(token, secret);
+  if (!payload || !payload.uid) return null;
+
+  const now = Date.now();
+  const hit = proxyUserCache.get(payload.uid);
+  if (hit && hit.exp > now) return hit.user;
+
+  const user = await env.DB.prepare(
+    "SELECT id, username, role, disabled FROM users WHERE id = ?"
+  )
+    .bind(payload.uid)
+    .first();
+  if (!user || user.disabled) {
+    proxyUserCache.delete(payload.uid);
+    return null;
+  }
+  if (proxyUserCache.size >= PROXY_USER_MAX) proxyUserCache.clear();
+  proxyUserCache.set(payload.uid, { user, exp: now + PROXY_USER_TTL });
+  return user;
+}
+
 /* ------------------------------ 初始化状态 ------------------------------ */
 
 /**
@@ -503,6 +546,7 @@ async function handleAdminToggle(request, env) {
   if (!result.success || !result.meta || result.meta.changes === 0) {
     return json({ ok: false, error: "用户不存在" }, 404);
   }
+  invalidateProxyUserCache();
   return json({ ok: true });
 }
 
@@ -532,6 +576,7 @@ async function handleAdminReset(request, env) {
   if (!result.success || !result.meta || result.meta.changes === 0) {
     return json({ ok: false, error: "用户不存在" }, 404);
   }
+  invalidateProxyUserCache();
   return json({ ok: true });
 }
 

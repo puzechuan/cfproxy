@@ -380,19 +380,17 @@ describe("下载加速与缓存", () => {
 		);
 	});
 
-	it("并发 Range 未命中只预热一次完整对象，且预热不带条件请求头", async () => {
+	it("Range 未命中不会顺手预热整份对象（避免和下载抢带宽）", async () => {
 		const fetchMock = vi.fn((req) => {
 			const isRange = req.headers.has("range");
-			const response = new Response(isRange ? "0123456789" : "full-object", {
-				status: isRange ? 206 : 200,
-				headers: isRange
-					? { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }
-					: { "Content-Length": "11", "Accept-Ranges": "bytes" },
-			});
-			// 让预热保持 pending，确保并发请求能命中"正在预热"状态
-			return isRange
-				? Promise.resolve(response)
-				: new Promise((resolve) => setTimeout(() => resolve(response), 40));
+			return Promise.resolve(
+				new Response(isRange ? "0123456789" : "full-object", {
+					status: isRange ? 206 : 200,
+					headers: isRange
+						? { "Content-Range": "bytes 0-9/100", "Content-Length": "10" }
+						: { "Content-Length": "11", "Accept-Ranges": "bytes" },
+				})
+			);
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
@@ -416,11 +414,11 @@ describe("下载加速与缓存", () => {
 		]);
 		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
 
-		// 两次 Range 请求 + 一次完整预热，而不是两次完整预热
-		expect(fetchMock).toHaveBeenCalledTimes(3);
-		const warm = fetchMock.mock.calls.find(([req]) => !req.headers.has("range"));
-		expect(warm).toBeDefined();
-		expect(warm[0].headers.has("if-none-match")).toBe(false);
+		// 只有这两个分段请求回源，没有任何额外的整份文件拉取
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(
+			fetchMock.mock.calls.every(([req]) => req.headers.has("range"))
+		).toBe(true);
 	});
 });
 
@@ -1074,6 +1072,14 @@ describe("用户系统 · 管理员", () => {
 			headers: { cookie: sessionCookie },
 		}), ae);
 		expect(blocked.status).toBe(401);
+
+		// 代理热路径用的是 isolate 缓存版本，禁用后同样要立刻拦住，
+		// 不能被缓存里的旧记录放行
+		const blockedProxy = await api(
+			withAuth(new Request("http://example.com/https://github.com/foo/bar/releases/download/v1/x.zip")),
+			ae
+		);
+		expect(blockedProxy.status).toBe(401);
 
 		// 恢复，避免影响其他测试
 		const restore = await api(
