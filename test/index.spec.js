@@ -963,18 +963,28 @@ describe("用户系统 · 访问控制", () => {
 
 	it("未登录访问用户管理页跳转登录页并记住原地址", async () => {
 		const res = await worker.fetch(
-			new Request("http://example.com/admin.html"),
+			new Request("http://example.com/admin"),
 			env,
 			createExecutionContext()
 		);
 		expect(res.status).toBe(302);
 		const location = res.headers.get("location");
 		expect(location).toContain("/login.html");
-		expect(location).toContain("%2Fadmin.html");
+		expect(location).toContain("%2Fadmin");
+	});
+
+	it("旧的文件地址 /admin.html 统一跳转到 /admin，不能直接打开静态文件", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/admin.html"),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(302);
+		expect(res.headers.get("location")).toMatch(/\/admin$/);
 	});
 
 	it("普通用户访问用户管理页被送回首页", async () => {
-		const res = await call(new Request("http://example.com/admin.html"));
+		const res = await call(new Request("http://example.com/admin"));
 		expect(res.status).toBe(302);
 		expect(res.headers.get("location")).toMatch(/\/$/);
 	});
@@ -1140,11 +1150,78 @@ describe("用户系统 · 管理员", () => {
 	it("管理员可打开用户管理页", async () => {
 		const ae = env;
 		const adminCookie = await adminSessionCookie();
-		const req = new Request("http://example.com/admin.html");
+		const req = new Request("http://example.com/admin");
 		req.headers.set("cookie", adminCookie);
 
 		const res = await api(req, ae);
 		expectPageServed(res, "admin.html");
+	});
+
+	it("注册开关：关闭后无法注册，已注册用户仍可登录，重新开放后恢复注册", async () => {
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
+		const authed = (path, init) => {
+			const r = new Request("http://example.com" + path, init);
+			r.headers.set("cookie", adminCookie);
+			return r;
+		};
+		const settings = (payload) =>
+			authed("/api/admin/settings", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(payload),
+			});
+
+		// 默认开放
+		const before = await api(authed("/api/admin/settings"), ae);
+		expect(before.status).toBe(200);
+		expect((await before.json()).registrationOpen).toBe(true);
+
+		// 关闭注册
+		const closed = await api(settings({ registrationOpen: false }), ae);
+		expect(closed.status).toBe(200);
+		expect((await closed.json()).registrationOpen).toBe(false);
+
+		// 新账号注册被拒绝
+		const denied = await api(
+			jsonRequest("/api/register", { username: "newbie", password: "password123" }),
+			ae
+		);
+		expect(denied.status).toBe(403);
+		expect((await denied.json()).error).toContain("关闭注册");
+
+		// 已注册用户登录完全不受影响
+		const relogin = await api(
+			jsonRequest("/api/login", { username: ADMIN_USER, password: ADMIN_PASS }),
+			ae
+		);
+		expect(relogin.status).toBe(200);
+
+		// 登录页据此隐藏注册入口
+		const status = await api(new Request("http://example.com/api/init-status"), ae);
+		expect((await status.json()).registrationOpen).toBe(false);
+
+		// 重新开放后注册恢复
+		const reopened = await api(settings({ registrationOpen: true }), ae);
+		expect(reopened.status).toBe(200);
+		const okAgain = await api(
+			jsonRequest("/api/register", { username: "newbie", password: "password123" }),
+			ae
+		);
+		expect(okAgain.status).toBe(200);
+	});
+
+	it("注册开关：普通用户无权修改设置", async () => {
+		const res = await api(
+			withAuth(
+				new Request("http://example.com/api/admin/settings", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ registrationOpen: false }),
+				})
+			)
+		);
+		expect(res.status).toBe(403);
 	});
 
 	it("管理员可重置用户密码，新密码可登录", async () => {

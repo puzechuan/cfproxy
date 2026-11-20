@@ -10,6 +10,8 @@
  * 4. 首次部署时系统处于「未初始化」状态，只有 /init.html 可访问；
  *    初始化接口在「无管理员且未初始化」时可用一次，用于创建第一个管理员账号，
  *    初始化完成后标记写入 settings，之后该接口永久失效，不存在抢注窗口。
+ * 5. 管理员可以关闭注册（settings.registration_open = "0"）。该标记只被
+ *    /api/register 读取，登录与代理鉴权完全不看它，所以关闭注册不影响老用户。
  */
 
 const COOKIE = "cfproxy_session";
@@ -279,6 +281,40 @@ export async function isInstalled(env) {
   }
 }
 
+/* ------------------------------ 注册开关 -------------------------------- */
+
+/**
+ * 管理员可以在后台关闭「新用户注册」。
+ * 开关只影响 /api/register 这一条路径：已注册用户的登录、会话与代理访问
+ * 完全不读这个标记，所以关闭注册不会影响任何老用户。
+ * 用 settings 存一个 "0"/"1"，缺省即开放——这样默认行为与旧版本一致。
+ */
+const REGISTRATION_KEY = "registration_open";
+
+export async function isRegistrationOpen(env) {
+  if (!env || !env.DB) return false;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT value FROM settings WHERE key = ?"
+    )
+      .bind(REGISTRATION_KEY)
+      .first();
+    // 没有记录 = 从未关闭过；只有显式写入 "0" 才算关闭
+    return !row || row.value !== "0";
+  } catch (e) {
+    // 表还没建（未执行迁移）时按关闭处理，避免注册接口直接 500
+    return false;
+  }
+}
+
+async function setRegistrationOpen(env, open) {
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)"
+  )
+    .bind(REGISTRATION_KEY, open ? "1" : "0")
+    .run();
+}
+
 /* ------------------------------ 初始化密钥 ------------------------------ */
 
 async function sha256Hex(text) {
@@ -420,6 +456,12 @@ async function handleRegister(request, env) {
 
   if (!(await isInstalled(env))) {
     return json({ ok: false, error: "系统尚未初始化，请先完成初始化" }, 403);
+  }
+  if (!(await isRegistrationOpen(env))) {
+    return json(
+      { ok: false, error: "管理员已关闭注册，暂不开放新账号注册" },
+      403
+    );
   }
   if (!validUsername(username)) {
     return json(
@@ -580,6 +622,34 @@ async function handleAdminReset(request, env) {
   return json({ ok: true });
 }
 
+async function handleAdminGetSettings(env) {
+  return json({
+    ok: true,
+    registrationOpen: await isRegistrationOpen(env),
+  });
+}
+
+async function handleAdminUpdateSettings(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ ok: false, error: "请求格式错误" }, 400);
+  }
+  if (typeof body.registrationOpen !== "boolean") {
+    return json({ ok: false, error: "registrationOpen 需为布尔值" }, 400);
+  }
+  try {
+    await setRegistrationOpen(env, body.registrationOpen);
+  } catch (e) {
+    return json({ ok: false, error: "保存失败，请稍后重试" }, 500);
+  }
+  return json({
+    ok: true,
+    registrationOpen: await isRegistrationOpen(env),
+  });
+}
+
 /* ------------------------------ 路由入口 -------------------------------- */
 
 /**
@@ -591,7 +661,12 @@ export async function handleAuthApi(request, env, path) {
     return handleInit(request, env);
   }
   if (path === "/api/init-status") {
-    return json({ ok: true, installed: await isInstalled(env) });
+    return json({
+      ok: true,
+      installed: await isInstalled(env),
+      // 登录页据此决定是否展示「注册」入口
+      registrationOpen: await isRegistrationOpen(env),
+    });
   }
   if (path === "/api/register" && method === "POST") {
     return handleRegister(request, env);
@@ -625,6 +700,12 @@ export async function handleAuthApi(request, env, path) {
     }
     if (path === "/api/admin/reset" && method === "POST") {
       return handleAdminReset(request, env);
+    }
+    if (path === "/api/admin/settings" && method === "GET") {
+      return handleAdminGetSettings(env);
+    }
+    if (path === "/api/admin/settings" && method === "POST") {
+      return handleAdminUpdateSettings(request, env);
     }
     return json({ ok: false, error: "未知接口" }, 404);
   }

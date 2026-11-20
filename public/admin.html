@@ -17,7 +17,7 @@
     </div>
     <div>
       <h1>用户管理</h1>
-      <div class="sub">查看注册用户、启用或禁用账号、重置密码</div>
+      <div class="sub">注册开关、用户列表、账号状态与密码重置</div>
     </div>
     <div class="header-actions" id="userBar" hidden>
       <span class="who" id="who"></span>
@@ -29,6 +29,23 @@
   <div class="loading" id="loading">正在检查权限…</div>
 
   <main id="mainContent" hidden>
+    <section class="card">
+      <h2>注册设置</h2>
+      <div class="setting-row">
+        <div class="setting-text">
+          <div class="setting-title">允许新用户注册</div>
+          <div class="setting-desc">关闭后登录页不再显示「注册」标签，注册接口也会拒绝新账号；已注册用户仍可正常登录和使用代理，不受任何影响。</div>
+        </div>
+        <div class="setting-control">
+          <span class="state-label" id="regState">—</span>
+          <button class="switch" id="regToggle" role="switch" aria-checked="true" aria-label="允许新用户注册">
+            <span class="knob"></span>
+          </button>
+        </div>
+      </div>
+      <p class="msg" id="settingMsg"></p>
+    </section>
+
     <section class="card">
       <h2>全部用户</h2>
       <div class="stat-row" id="stats"></div>
@@ -53,11 +70,65 @@
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var currentUser = null;
+  var registrationOpen = true;
+  var regBusy = false;
 
   function setMsg(text, isErr) {
     var el = $('msg');
     el.textContent = text;
     el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  function setSettingMsg(text, isErr) {
+    var el = $('settingMsg');
+    el.textContent = text;
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  /** 开关只改状态，不重建节点：按钮里有个 knob，不能用 textContent 覆写 */
+  function renderSwitch(open) {
+    registrationOpen = !!open;
+    var btn = $('regToggle');
+    var state = $('regState');
+    btn.setAttribute('aria-checked', registrationOpen ? 'true' : 'false');
+    btn.setAttribute('title', registrationOpen ? '点击关闭注册' : '点击开放注册');
+    state.textContent = registrationOpen ? '已开放' : '已关闭';
+    state.className = 'state-label ' + (registrationOpen ? 'state-on' : 'state-off');
+  }
+
+  function loadSettings() {
+    return CF.api('/api/admin/settings').then(function (out) {
+      if (!out.ok) throw new Error(out.data.error || '加载注册设置失败');
+      renderSwitch(out.data.registrationOpen);
+    });
+  }
+
+  function toggleRegistration() {
+    if (regBusy) return;
+    var btn = $('regToggle');
+    var next = !registrationOpen;
+    regBusy = true;
+    btn.disabled = true;
+
+    CF.api('/api/admin/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ registrationOpen: next })
+    }).then(function (out) {
+      if (!out.ok) throw new Error(out.data.error || '保存失败');
+      renderSwitch(out.data.registrationOpen);
+      setSettingMsg(
+        next
+          ? '已开放注册，新用户可以通过登录页注册。'
+          : '已关闭注册，新账号无法创建；已注册用户登录不受影响。',
+        false
+      );
+    }).catch(function (e) {
+      setSettingMsg(e.message, true);
+    }).then(function () {
+      regBusy = false;
+      btn.disabled = false;
+    });
   }
 
   function renderStats(users) {
@@ -178,10 +249,11 @@
   }
 
   $('logoutBtn').addEventListener('click', function () { CF.logout(); });
+  $('regToggle').addEventListener('click', toggleRegistration);
 
   // 双重校验：未登录回登录页，非管理员回主页面
   CF.me().then(function (user) {
-    if (!user) return CF.toLogin('/admin.html');
+    if (!user) return CF.toLogin('/admin');
     if (user.role !== 'admin') return location.replace('/');
     currentUser = user;
     $('who').innerHTML = '你好，<b></b> <span class="role-tag admin">管理员</span>';
@@ -189,6 +261,7 @@
     $('loading').hidden = true;
     $('mainContent').hidden = false;
     $('userBar').hidden = false;
+    loadSettings().catch(function (e) { setSettingMsg(e.message, true); });
     load();
   });
 })();
