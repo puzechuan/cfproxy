@@ -200,6 +200,13 @@ td .muted { color: var(--muted); font-size: 11.5px; }
 .prose b { color: var(--text); }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--text); }
 .code-wrap { max-width: var(--form); }
+/* 长 URL（免登录密钥示例）允许折行，避免横向滚动 */
+.code.wrap { white-space: pre-wrap; word-break: break-all; }
+/* 64 位密钥用等宽字体，方便肉眼比对 */
+input.mono-val {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+}
 .code-bar { display: flex; justify-content: flex-end; margin-bottom: 6px; }
 .code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

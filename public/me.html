@@ -37,6 +37,39 @@
         <div class="info-row"><span class="info-key">角色</span><span class="info-val" id="infoRole">—</span></div>
         <div class="info-row"><span class="info-key">注册时间</span><span class="info-val" id="infoCreated">—</span></div>
         <div class="info-row"><span class="info-key">最近登录</span><span class="info-val" id="infoLogin">—</span></div>
+        <div class="info-row"><span class="info-key">密钥生成</span><span class="info-val" id="infoSecretAt">—</span></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>免登录访问密钥</h2>
+      <p class="prose">
+        生成一把 64 位密钥后，把它带到地址里就能直接使用代理，<b>不需要登录、也不依赖 Cookie</b>：
+        <span class="mono">https://本域名/&lt;密钥&gt;/https://github.com/用户/仓库</span>。
+        适合服务器上的 <span class="mono">wget</span> / <span class="mono">curl</span> / <span class="mono">git</span>，
+        以及不方便登录的下载工具。重新生成会立刻作废旧密钥。
+      </p>
+      <div class="form-box">
+        <div class="auth-form">
+          <div class="row-field">
+            <label for="secretVal">当前密钥</label>
+            <input type="text" id="secretVal" class="mono-val" readonly placeholder="尚未生成" spellcheck="false">
+          </div>
+          <div class="field">
+            <button id="genBtn">一键生成密钥</button>
+            <button class="ghost" id="copyBtn" hidden>复制密钥</button>
+            <button class="danger" id="revokeBtn" hidden>停用密钥</button>
+          </div>
+        </div>
+        <p class="msg" id="secretMsg"></p>
+        <p class="auth-hint">
+          密钥等同于密码，而且会出现在 URL 里：不要贴到公开仓库、截图或群里。
+          想换一把就再点一次「生成」，旧链接立即失效；不再需要时点「停用」。
+        </p>
+        <div class="code-wrap" id="exampleWrap" hidden>
+          <div class="code-bar"><button class="ghost small" id="copyExampleBtn">复制示例链接</button></div>
+          <pre class="code wrap" id="example"></pre>
+        </div>
       </div>
     </section>
 
@@ -115,6 +148,95 @@
     });
   }
 
+  /* -------------------- 免登录访问密钥（/api/me/secret） -------------------- */
+
+  var accessSecret = '';
+
+  function setSecretMsg(text, isErr) {
+    var el = $('secretMsg');
+    el.textContent = text;
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  function renderSecret() {
+    var has = !!accessSecret;
+    $('secretVal').value = accessSecret;
+    $('copyBtn').hidden = !has;
+    $('revokeBtn').hidden = !has;
+    $('exampleWrap').hidden = !has;
+    $('example').textContent = has
+      ? location.origin + '/' + accessSecret + '/https://github.com/octocat/Hello-World'
+      : '';
+  }
+
+  /** 复制：优先 Clipboard API（需 https），失败退回选中 + execCommand */
+  function copyText(text, btn) {
+    if (!text) return;
+    var label = btn.textContent;
+    function flash(ok) {
+      btn.textContent = ok ? '已复制' : '复制失败';
+      setTimeout(function () { btn.textContent = label; }, 1400);
+    }
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        flash(ok);
+      } catch (e) { flash(false); }
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { flash(true); }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  function generateSecret() {
+    var done = CF.busy($('genBtn'), '生成中…');
+    CF.api('/api/me/secret', { method: 'POST' }).then(function (out) {
+      done();
+      if (!out.ok || !out.data.secret) throw new Error(out.data.error || '生成失败');
+      accessSecret = out.data.secret;
+      renderSecret();
+      $('infoSecretAt').textContent = CF.fmtTime(out.data.created_at);
+      setSecretMsg('已生成新的访问密钥，之前那把立即失效。', false);
+    }).catch(function (e) {
+      done();
+      setSecretMsg(e && e.message ? e.message : '生成失败', true);
+    });
+  }
+
+  function revokeSecret() {
+    if (!window.confirm('停用后所有带这把密钥的链接会立刻失效，确定继续？')) return;
+    var done = CF.busy($('revokeBtn'), '停用中…');
+    CF.api('/api/me/secret', { method: 'DELETE' }).then(function (out) {
+      done();
+      if (!out.ok) throw new Error(out.data.error || '停用失败');
+      accessSecret = '';
+      renderSecret();
+      $('infoSecretAt').textContent = '—';
+      setSecretMsg('密钥已停用。', false);
+    }).catch(function (e) {
+      done();
+      setSecretMsg(e && e.message ? e.message : '停用失败', true);
+    });
+  }
+
+  $('genBtn').addEventListener('click', generateSecret);
+  $('revokeBtn').addEventListener('click', revokeSecret);
+  $('copyBtn').addEventListener('click', function () {
+    copyText(accessSecret, $('copyBtn'));
+  });
+  $('copyExampleBtn').addEventListener('click', function () {
+    copyText($('example').textContent, $('copyExampleBtn'));
+  });
+
   $('submitBtn').addEventListener('click', submit);
   ['curPass', 'newPass', 'confirmPass'].forEach(function (id) {
     $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
@@ -133,6 +255,9 @@
     $('infoRole').textContent = user.role === 'admin' ? '管理员' : '普通用户';
     $('infoCreated').textContent = CF.fmtTime(user.created_at);
     $('infoLogin').textContent = CF.fmtTime(user.last_login);
+    $('infoSecretAt').textContent = CF.fmtTime(user.secret_created_at);
+    accessSecret = user.secret || '';
+    renderSecret();
     $('loading').hidden = true;
     $('mainContent').hidden = false;
     $('userBar').hidden = false;
