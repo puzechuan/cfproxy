@@ -53,6 +53,10 @@ cfproxy 登录脚本
   wget --load-cookies ~/.cfproxy.cookie -c 'https://<站点>/https://github.com/...'
   aria2c --load-cookies ~/.cfproxy.cookie -x16 -s16 'https://<站点>/https://github.com/...'
   git -c http.extraHeader="Cookie: cfproxy_session=$(./cfproxy-login.sh -t)" clone 'https://<站点>/https://github.com/u/r.git'
+
+注意：不带 Cookie 的请求一律 401（wget 会提示 Username/Password Authentication Failed）。
+想让 wget 不带参数也能用，执行一次：
+  echo 'load_cookies = ~/.cfproxy.cookie' >> ~/.wgetrc
 EOF
 }
 
@@ -182,3 +186,6 @@ echo "    curl -b $COOKIE_FILE -fLO '$BASE/https://github.com/u/r/releases/downl
 echo "    wget --load-cookies $COOKIE_FILE -c '$BASE/https://github.com/...'"
 echo "    aria2c --load-cookies $COOKIE_FILE -x16 -s16 '$BASE/https://github.com/...'"
 echo "    git -c http.extraHeader=\"Cookie: cfproxy_session=\$($0 -t)\" clone '$BASE/https://github.com/u/r.git'"
+echo
+echo "  注意：不带 Cookie 会返回 401（wget 里表现为 Username/Password Authentication Failed）"
+echo "  想让 wget 直接可用，执行一次：echo 'load_cookies = $COOKIE_FILE' >> ~/.wgetrc"
