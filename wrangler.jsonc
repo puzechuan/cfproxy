@@ -11,8 +11,24 @@
 		"global_fetch_strictly_public"
 	],
 	"assets": {
-		// The path to the directory containing the `index.html` file to be served at `/`
-		"directory": "./public"
+		// 静态页面目录：/login.html 登录注册、/index.html 主页面、/admin.html 用户管理
+		"directory": "./public",
+		"binding": "ASSETS",
+		// 这三个页面必须先经过 Worker 做登录/权限校验，再回读静态文件
+		"run_worker_first": ["/", "/index.html", "/login.html", "/admin.html"]
+	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "cfproxy-users",
+			"database_id": "4864ab88-5b74-4414-baf4-80a83e3261ce",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		// 管理员用户名（逗号分隔）。这些账号用此用户名注册后自动成为管理员，
+		// 因为用户名唯一，别人无法抢注同名管理员账号。
+		"ADMIN_USERS": "admin"
 	},
 	"observability": {
 		"enabled": true,

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>用户管理 · GitHub 加速代理</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 18h12a4 4 0 0 0 .4-7.98A6 6 0 0 0 6.6 8.2 4.9 4.9 0 0 0 6 18z"/>
+        <path d="M12 9v6m0 0-2.5-2.5M12 15l2.5-2.5"/>
+      </svg>
+    </div>
+    <div>
+      <h1>用户管理</h1>
+      <div class="sub">查看注册用户、启用或禁用账号、重置密码</div>
+    </div>
+    <div class="header-actions" id="userBar" hidden>
+      <span class="who" id="who"></span>
+      <a class="btn" href="/">返回主页</a>
+      <button class="ghost small" id="logoutBtn">退出</button>
+    </div>
+  </header>
+
+  <div class="loading" id="loading">正在检查权限…</div>
+
+  <main id="mainContent" hidden>
+    <section class="card">
+      <h2>全部用户</h2>
+      <div class="stat-row" id="stats"></div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr><th>用户名</th><th>角色</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>操作</th></tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p class="msg" id="msg"></p>
+      <p class="auth-hint" style="margin-top:10px">禁用账号会立即失效该用户已登录的会话；重置密码后请通知对应用户。</p>
+    </section>
+  </main>
+
+  <footer>Cloudflare Workers · GitHub Reverse Proxy · 请遵守 GitHub 服务条款，勿用于滥用流量</footer>
+</div>
+
+<script src="/app.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var currentUser = null;
+
+  function setMsg(text, isErr) {
+    var el = $('msg');
+    el.textContent = text;
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  function renderStats(users) {
+    var admin = users.filter(function (u) { return u.role === 'admin'; }).length;
+    var disabled = users.filter(function (u) { return u.disabled; }).length;
+    var box = $('stats');
+    box.innerHTML = '';
+    [
+      ['总用户', users.length],
+      ['管理员', admin],
+      ['已禁用', disabled]
+    ].forEach(function (item) {
+      var el = document.createElement('div');
+      el.className = 'stat';
+      var b = document.createElement('b');
+      b.textContent = item[1];
+      el.appendChild(b);
+      el.appendChild(document.createTextNode(item[0]));
+      box.appendChild(el);
+    });
+  }
+
+  function adminAction(path, payload, btn) {
+    var done = CF.busy(btn, '处理中…');
+    CF.api(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (out) {
+      if (!out.ok) throw new Error(out.data.error || '操作失败');
+      return load();
+    }).catch(function (e) {
+      setMsg(e.message, true);
+      done();
+    });
+  }
+
+  function row(user) {
+    var tr = document.createElement('tr');
+
+    var nameCell = document.createElement('td');
+    var uname = document.createElement('span');
+    uname.className = 'uname';
+    uname.textContent = user.username;
+    var id = document.createElement('span');
+    id.className = 'muted';
+    id.textContent = 'ID ' + user.id;
+    nameCell.appendChild(uname);
+    nameCell.appendChild(document.createElement('br'));
+    nameCell.appendChild(id);
+
+    var roleCell = document.createElement('td');
+    roleCell.textContent = user.role === 'admin' ? '管理员' : '用户';
+
+    var stateCell = document.createElement('td');
+    var state = document.createElement('span');
+    state.className = user.disabled ? 'state-off' : 'state-on';
+    state.textContent = user.disabled ? '已禁用' : '正常';
+    stateCell.appendChild(state);
+
+    var createdCell = document.createElement('td');
+    createdCell.className = 'muted';
+    createdCell.textContent = CF.fmtTime(user.created_at);
+
+    var loginCell = document.createElement('td');
+    loginCell.className = 'muted';
+    loginCell.textContent = CF.fmtTime(user.last_login);
+
+    var actionCell = document.createElement('td');
+    var wrap = document.createElement('div');
+    wrap.className = 'admin-actions';
+
+    // 不能禁用自己，避免把自己锁在门外
+    if (user.username !== currentUser.username) {
+      var toggle = document.createElement('button');
+      toggle.className = 'ghost small';
+      toggle.textContent = user.disabled ? '启用' : '禁用';
+      toggle.addEventListener('click', function () {
+        adminAction('/api/admin/toggle', { id: user.id, disabled: !user.disabled }, toggle);
+      });
+      wrap.appendChild(toggle);
+    }
+
+    var reset = document.createElement('button');
+    reset.className = 'ghost small';
+    reset.textContent = '重置密码';
+    reset.addEventListener('click', function () {
+      var np = window.prompt('为 ' + user.username + ' 设置新密码（至少 8 位）：', '');
+      if (!np) return;
+      if (np.length < 8) return setMsg('新密码至少 8 位', true);
+      adminAction('/api/admin/reset', { id: user.id, password: np }, reset);
+    });
+    wrap.appendChild(reset);
+
+    actionCell.appendChild(wrap);
+
+    tr.appendChild(nameCell);
+    tr.appendChild(roleCell);
+    tr.appendChild(stateCell);
+    tr.appendChild(createdCell);
+    tr.appendChild(loginCell);
+    tr.appendChild(actionCell);
+    return tr;
+  }
+
+  function load() {
+    return CF.api('/api/admin/users').then(function (out) {
+      if (!out.ok) throw new Error(out.data.error || '加载失败');
+      var users = out.data.users || [];
+      var tbody = $('rows');
+      tbody.innerHTML = '';
+      users.forEach(function (u) { tbody.appendChild(row(u)); });
+      renderStats(users);
+      setMsg('共 ' + users.length + ' 个用户', false);
+    }).catch(function (e) {
+      setMsg(e.message, true);
+    });
+  }
+
+  $('logoutBtn').addEventListener('click', function () { CF.logout(); });
+
+  // 双重校验：未登录回登录页，非管理员回主页面
+  CF.me().then(function (user) {
+    if (!user) return CF.toLogin('/admin.html');
+    if (user.role !== 'admin') return location.replace('/');
+    currentUser = user;
+    $('who').innerHTML = '你好，<b></b> <span class="role-tag admin">管理员</span>';
+    $('who').querySelector('b').textContent = user.username;
+    $('loading').hidden = true;
+    $('mainContent').hidden = false;
+    $('userBar').hidden = false;
+    load();
+  });
+})();
+</script>
+</body>
+</html>

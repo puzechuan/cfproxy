@@ -13,13 +13,16 @@
  * 4. 成功的下载响应允许浏览器缓存，二次下载连 Worker 都不经过。
  * 5. 二进制响应保留 Content-Length / Accept-Ranges / Content-Range，支持断点续传。
  * 6. 全链路结构化日志，可在 Workers Logs（Observability）中查询。
+ * 7. 用户系统：仅注册用户可访问代理；D1 存用户，HMAC 签名会话，服务端可禁用。
  */
 
-// 静态页面在构建时由 index.html 注入；本地直接运行时为空串，请以部署版本为准
-const UI_HTML = "__UI_HTML__";
+import { handleAuthApi, getUser } from "./auth";
+
+// 页面拆分为三个独立 HTML（public/login.html、public/index.html、public/admin.html），
+// 由静态资源目录提供；命中 run_worker_first 的路径会先到 Worker，因此在这里做服务端鉴权。
 
 // 用于线上确认部署版本（/health 中返回）
-const BUILD_ID = "2026-11-20.7";
+const BUILD_ID = "2026-11-20.9";
 
 // 允许代理的源站，防止被当作开放代理滥用
 // github.githubassets.com 承载 GitHub 页面的绝大部分 JS/CSS，必须走代理，
@@ -125,13 +128,26 @@ function json(data, status = 200, headers = {}) {
   });
 }
 
-function uiResponse() {
-  return new Response(UI_HTML, {
-    headers: {
-      "Content-Type": "text/html; charset=UTF-8",
-      "Cache-Control": "public, max-age=86400",
-    },
+function redirect(location) {
+  return new Response(null, {
+    status: 302,
+    headers: { Location: location, "Cache-Control": "no-store" },
   });
+}
+
+/** 从静态资源绑定取回页面；页面含登录态，统一 no-store，避免被缓存后串号 */
+async function pageResponse(request, env, path) {
+  const target = new URL(path, request.url);
+  if (env && env.ASSETS && typeof env.ASSETS.fetch === "function") {
+    const res = await env.ASSETS.fetch(target.toString());
+    if (res.ok) {
+      const headers = new Headers(res.headers);
+      headers.set("Cache-Control", "no-store");
+      return new Response(res.body, { status: res.status, headers });
+    }
+  }
+  // 极端情况下（未绑定静态资源）至少把用户送回首页，而不是白屏
+  return redirect(target.origin + "/");
 }
 
 /** 一次性签名链接过期后，给出可操作的提示，而不是一个突兀的 500/403 */
@@ -672,6 +688,49 @@ async function handleRequest(request, env, ctx) {
     return new Response(null, { status: 204 });
   }
 
+  // 认证接口：注册 / 登录 / 登出 / 当前用户 / 管理员操作。
+  // 这些接口自身处理登录态（登录、注册无需登录；管理接口内部校验角色）。
+  if (path.indexOf("/api/") === 0) {
+    const authResponse = await handleAuthApi(request, env, path);
+    if (authResponse) return authResponse;
+    return json({ ok: false, error: "未知接口" }, 404);
+  }
+
+  // ---- 页面路由 ----
+  // 登录页公开；主页面与用户管理页在服务端校验身份，未登录/非管理员直接重定向。
+  // 保留旧链接兼容：带 ?url= 的首页请求仍然走下面的代理逻辑。
+  const isPage =
+    path === "/" || path === "/index.html" || path === "/login.html" || path === "/admin.html";
+  const fromLegacyLink = url.searchParams.has("url") && path !== "/login.html";
+
+  if (isPage && !fromLegacyLink) {
+    const pageUser = await getUser(request, env);
+    if (path === "/login.html") {
+      if (pageUser) return redirect(base + "/");
+      return pageResponse(request, env, "/login.html");
+    }
+    if (!pageUser) {
+      logEvent("page_auth_required", { path });
+      const next = path === "/admin.html" ? "%2Fadmin.html" : "%2F";
+      return redirect(base + "/login.html?next=" + next);
+    }
+    if (path === "/admin.html" && pageUser.role !== "admin") {
+      return redirect(base + "/");
+    }
+    return pageResponse(request, env, path);
+  }
+
+  // 其余一切请求（预热接口 + 代理访问）都必须登录
+  const user = await getUser(request, env);
+  if (!user) {
+    logEvent("auth_required", { path });
+    return json(
+      { error: "请先登录后再使用加速代理", needLogin: true },
+      401,
+      { "WWW-Authenticate": "Session" }
+    );
+  }
+
   // 显式预热接口：等整份文件写完边缘缓存才返回，页面可据此提示用户再下载。
   // 用法：/__warm?url=https%3A%2F%2Fgithub.com%2Fo%2Fr%2Freleases%2Fdownload%2F...
   if (path === "/__warm") {
@@ -735,12 +794,9 @@ async function handleRequest(request, env, ctx) {
     }
   }
 
-  if ((path === "/" || path === "/index.html") && !url.searchParams.has("url")) {
-    return uiResponse();
-  }
-
   const probe = extractTarget(request);
-  if (!probe) return uiResponse();
+  // 登录后访问到既不是页面也不是可代理地址的路径：回首页，避免出现空白页
+  if (!probe) return redirect(base + "/");
   if (probe.error) {
     logEvent("bad_target", { error: probe.error });
     return json(

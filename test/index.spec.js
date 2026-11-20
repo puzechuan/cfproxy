@@ -1,16 +1,66 @@
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeAll } from "vitest";
 import worker from "../src";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
+// 测试用普通用户会话：所有代理类请求需要带登录态
+let sessionCookie = "";
+const TEST_USER = "tester";
+const TEST_PASS = "password123";
+
+beforeAll(async () => {
+	// 测试环境有独立 D1 实例，先确保表结构存在（幂等）
+	await env.DB.exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE, pass_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user', disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_login TEXT)");
+	await env.DB.exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+
+	// 注册（已存在则忽略），再登录拿会话 Cookie
+	const reg = new Request("http://example.com/api/register", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ username: TEST_USER, password: TEST_PASS }),
+	});
+	const rc = createExecutionContext();
+	await worker.fetch(reg, env, rc);
+	await waitOnExecutionContext(rc);
+
+	const login = new Request("http://example.com/api/login", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ username: TEST_USER, password: TEST_PASS }),
+	});
+	const lc = createExecutionContext();
+	const res = await worker.fetch(login, env, lc);
+	await waitOnExecutionContext(lc);
+	sessionCookie = (res.headers.get("set-cookie") || "").split(";")[0];
+});
+
+function withAuth(request) {
+	if (sessionCookie) request.headers.set("cookie", sessionCookie);
+	return request;
+}
+
 async function call(request) {
+	withAuth(request);
 	const ctx = createExecutionContext();
 	const response = await worker.fetch(request, env, ctx);
 	await waitOnExecutionContext(ctx);
 	return response;
+}
+
+/**
+ * 页面由静态资源提供。测试环境若没有 ASSETS 绑定，Worker 会退化成 302 指向页面文件，
+ * 因此这里两种结果都接受，但都会校验指向的文件名。
+ */
+function expectPageServed(response, file) {
+	if (response.status === 302) {
+		expect(response.headers.get("location")).toContain("/" + file);
+		return;
+	}
+	expect(response.status).toBe(200);
+	expect(response.headers.get("content-type")).toContain("text/html");
 }
 
 describe("代理入口", () => {
@@ -22,8 +72,7 @@ describe("代理入口", () => {
 
 	it("根路径返回静态页面", async () => {
 		const response = await call(new Request("http://example.com/"));
-		expect(response.status).toBe(200);
-		expect(response.headers.get("content-type")).toContain("text/html");
+		expectPageServed(response, "index.html");
 	});
 
 	it("拒绝白名单外域名", async () => {
@@ -163,8 +212,8 @@ describe("下载加速与缓存", () => {
 		const ctx1 = createExecutionContext();
 		const ctx2 = createExecutionContext();
 		await Promise.all([
-			worker.fetch(make(), env, ctx1),
-			worker.fetch(make(), env, ctx2),
+			worker.fetch(withAuth(make()), env, ctx1),
+			worker.fetch(withAuth(make()), env, ctx2),
 		]);
 		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
 
@@ -376,8 +425,8 @@ describe("显式预热接口", () => {
 		const ctx1 = createExecutionContext();
 		const ctx2 = createExecutionContext();
 		const [r1, r2] = await Promise.all([
-			worker.fetch(make(), env, ctx1),
-			worker.fetch(make(), env, ctx2),
+			worker.fetch(withAuth(make()), env, ctx1),
+			worker.fetch(withAuth(make()), env, ctx2),
 		]);
 		await Promise.all([waitOnExecutionContext(ctx1), waitOnExecutionContext(ctx2)]);
 
@@ -446,8 +495,15 @@ describe("回源线路优选", () => {
 	const assetUrl = "https://github.com/foo/bar/releases/download/v1/tool.tar.gz";
 
 	async function callWith(request, customEnv) {
+		withAuth(request);
 		const ctx = createExecutionContext();
-		const response = await worker.fetch(request, customEnv, ctx);
+		const merged = new Proxy(customEnv, {
+			get(target, prop) {
+				if (prop in target) return target[prop];
+				return env[prop];
+			},
+		});
+		const response = await worker.fetch(request, merged, ctx);
 		await waitOnExecutionContext(ctx);
 		return response;
 	}
@@ -580,5 +636,299 @@ describe("内容链接重写", () => {
 		expect(html).not.toContain("http://example.com/https://github.com");
 		// 文本被改写后原 Content-Length 已失效，必须移除
 		expect(response.headers.get("content-length")).toBeNull();
+	});
+});
+
+describe("用户系统 · 访问控制", () => {
+	it("未登录访问代理被拒绝（401 且带 needLogin）", async () => {
+		const response = await worker.fetch(
+			new Request("http://example.com/https://github.com/foo/bar"),
+			env,
+			createExecutionContext()
+		);
+		expect(response.status).toBe(401);
+		const data = await response.json();
+		expect(data.needLogin).toBe(true);
+	});
+
+	it("未登录访问预热接口同样被拒绝", async () => {
+		const response = await worker.fetch(
+			new Request("http://example.com/__warm?url=" + encodeURIComponent("https://github.com/foo/bar")),
+			env,
+			createExecutionContext()
+		);
+		expect(response.status).toBe(401);
+	});
+
+	it("健康接口无需登录，首页未登录则跳转登录页", async () => {
+		const health = await call(new Request("http://example.com/health"));
+		expect(health.status).toBe(200);
+		const home = await worker.fetch(new Request("http://example.com/"), env, createExecutionContext());
+		expect(home.status).toBe(302);
+		expect(home.headers.get("location")).toContain("/login.html");
+	});
+
+	it("登录页公开可访问", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/login.html"),
+			env,
+			createExecutionContext()
+		);
+		expectPageServed(res, "login.html");
+	});
+
+	it("已登录访问登录页会被送回首页", async () => {
+		const res = await call(new Request("http://example.com/login.html"));
+		expect(res.status).toBe(302);
+		expect(res.headers.get("location")).toMatch(/\/$/);
+	});
+
+	it("未登录访问用户管理页跳转登录页并记住原地址", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/admin.html"),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(302);
+		const location = res.headers.get("location");
+		expect(location).toContain("/login.html");
+		expect(location).toContain("%2Fadmin.html");
+	});
+
+	it("普通用户访问用户管理页被送回首页", async () => {
+		const res = await call(new Request("http://example.com/admin.html"));
+		expect(res.status).toBe(302);
+		expect(res.headers.get("location")).toMatch(/\/$/);
+	});
+
+	it("登录后可访问代理（会话 Cookie 生效）", async () => {
+		// 不真的打外网，避免网络抖动导致偶发失败
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response("hello", { status: 200, headers: { "content-type": "text/plain" } }))
+		);
+		const response = await call(new Request("http://example.com/https://raw.githubusercontent.com/a/b/main/x"));
+		expect(response.status).toBe(200);
+		expect(await response.text()).toBe("hello");
+	});
+
+	it("已登录用户 /api/me 返回身份", async () => {
+		const req = withAuth(new Request("http://example.com/api/me"));
+		const res = await worker.fetch(req, env, createExecutionContext());
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.user.username).toBe(TEST_USER);
+		expect(data.user.role).toBe("user");
+	});
+
+	it("错误密码登录失败，不泄露用户是否存在", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: TEST_USER, password: "wrong-password" }),
+			}),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(401);
+		expect((await res.json()).error).toContain("用户名或密码错误");
+	});
+
+	it("注册：密码过短被拒绝", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/api/register", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: "shortpw", password: "123" }),
+			}),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(400);
+	});
+
+	it("注册：重复用户名被拒绝", async () => {
+		const res = await worker.fetch(
+			new Request("http://example.com/api/register", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: TEST_USER, password: "password123" }),
+			}),
+			env,
+			createExecutionContext()
+		);
+		expect(res.status).toBe(409);
+	});
+});
+
+describe("用户系统 · 管理员", () => {
+	function adminEnv() {
+		return new Proxy({ ADMIN_USERS: "rootadmin", ADMIN_CODE: "join-secret-2026" }, {
+			get(target, prop) {
+				if (prop in target) return target[prop];
+				return env[prop];
+			},
+		});
+	}
+
+	async function api(req, e = env) {
+		return worker.fetch(req, e, createExecutionContext());
+	}
+
+	it("管理员用户名无邀请码时注册被拒绝（防抢注）", async () => {
+		const res = await api(
+			new Request("http://example.com/api/register", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
+			}),
+			adminEnv()
+		);
+		expect(res.status).toBe(403);
+	});
+
+	it("凭正确邀请码注册管理员成功，角色为 admin", async () => {
+		const res = await api(
+			new Request("http://example.com/api/register", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					username: "rootadmin",
+					password: "password123",
+					inviteCode: "join-secret-2026",
+				}),
+			}),
+			adminEnv()
+		);
+		expect(res.status).toBe(200);
+		const data = await res.json();
+		expect(data.user.role).toBe("admin");
+	});
+
+	it("普通用户访问管理接口被拒绝（403）", async () => {
+		const res = await api(withAuth(new Request("http://example.com/api/admin/users")));
+		expect(res.status).toBe(403);
+	});
+
+	it("未登录访问管理接口被拒绝（401）", async () => {
+		const res = await api(new Request("http://example.com/api/admin/users"));
+		expect(res.status).toBe(401);
+	});
+
+	it("管理员可列出用户、禁用账号，禁用立即生效", async () => {
+		const ae = adminEnv();
+		// 管理员登录
+		const login = await api(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
+			}),
+			ae
+		);
+		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const authed = (path, init) => {
+			const req = new Request("http://example.com" + path, init);
+			req.headers.set("cookie", adminCookie);
+			return req;
+		};
+
+		const list = await api(authed("/api/admin/users"), ae);
+		expect(list.status).toBe(200);
+		const users = (await list.json()).users;
+		expect(Array.isArray(users)).toBe(true);
+		const tester = users.find((u) => u.username === TEST_USER);
+		expect(tester).toBeDefined();
+
+		// 禁用 tester
+		const toggle = await api(
+			authed("/api/admin/toggle", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ id: tester.id, disabled: true }),
+			}),
+			ae
+		);
+		expect(toggle.status).toBe(200);
+
+		// tester 的旧 Cookie 立即失效
+		const blocked = await api(new Request("http://example.com/api/me", {
+			headers: { cookie: sessionCookie },
+		}), ae);
+		expect(blocked.status).toBe(401);
+
+		// 恢复，避免影响其他测试
+		const restore = await api(
+			authed("/api/admin/toggle", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ id: tester.id, disabled: false }),
+			}),
+			ae
+		);
+		expect(restore.status).toBe(200);
+	});
+
+	it("管理员可打开用户管理页", async () => {
+		const ae = adminEnv();
+		const login = await api(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
+			}),
+			ae
+		);
+		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const req = new Request("http://example.com/admin.html");
+		req.headers.set("cookie", adminCookie);
+
+		const res = await api(req, ae);
+		expectPageServed(res, "admin.html");
+	});
+
+	it("管理员可重置用户密码，新密码可登录", async () => {
+		const ae = adminEnv();
+		const login = await api(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: "rootadmin", password: "password123" }),
+			}),
+			ae
+		);
+		const adminCookie = (login.headers.get("set-cookie") || "").split(";")[0];
+		const list = await api(
+			(() => { const r = new Request("http://example.com/api/admin/users"); r.headers.set("cookie", adminCookie); return r; })(),
+			ae
+		);
+		const tester = (await list.json()).users.find((u) => u.username === TEST_USER);
+
+		const reset = await api(
+			(() => {
+				const r = new Request("http://example.com/api/admin/reset", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ id: tester.id, password: "newpassword456" }),
+				});
+				r.headers.set("cookie", adminCookie);
+				return r;
+			})(),
+			ae
+		);
+		expect(reset.status).toBe(200);
+
+		const relogin = await api(
+			new Request("http://example.com/api/login", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ username: TEST_USER, password: "newpassword456" }),
+			}),
+			ae
+		);
+		expect(relogin.status).toBe(200);
+		// 更新会话 Cookie 供后续测试使用
+		sessionCookie = (relogin.headers.get("set-cookie") || "").split(";")[0];
 	});
 });
