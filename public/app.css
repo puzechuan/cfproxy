@@ -14,6 +14,9 @@
   --form: 680px;
 }
 * { box-sizing: border-box; }
+/* 作者样式里的 display 会盖掉浏览器给 [hidden] 的 display:none，
+   导致 hidden 属性对 .btn / .header-actions 这类元素失效，这里统一兜底。 */
+[hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
