@@ -11,9 +11,21 @@
 		"global_fetch_strictly_public"
 	],
 	"assets": {
-		// The path to the directory containing the `index.html` file to be served at `/`
-		"directory": "./public"
+		// 静态页面目录：/init.html 首次初始化、/login.html 登录注册、/index.html 主页面、/admin.html 用户管理
+		"directory": "./public",
+		"binding": "ASSETS",
+		// 这几个页面必须先经过 Worker 做初始化/登录/权限校验，再回读静态文件
+		"run_worker_first": ["/", "/index.html", "/login.html", "/admin.html", "/init.html"]
 	},
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "cfproxy-users",
+			"database_id": "4864ab88-5b74-4414-baf4-80a83e3261ce",
+			"migrations_dir": "migrations"
+		}
+	],
+	// 管理员账号在首次部署时通过 /init.html 创建，不再需要额外的环境变量配置。
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 1,
@@ -44,17 +56,23 @@
 	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
 	 */
 	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/configuration/#environment-variables
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
+	 * Runtime variables and secrets（运行时变量与密钥）
+	 * https://developers.cloudflare.com/workers/configuration/environment-variables/
+	 *
+	 * INIT_KEY_SHA256：初始化管理员时必须输入的验证密钥，这里只放它的 SHA-256 摘要（小写 hex）。
+	 * 明文密钥不进仓库，只在 /init.html 的输入框里输入一次；服务端对输入做 SHA-256 后
+	 * 与这个摘要做定长比较，摘要不一致直接拒绝，接口在建管理员之前就返回。
+	 * 生成摘要：printf '%s' '你的明文密钥' | shasum -a 256
+	 * 想换密钥：改这里的摘要重新部署即可；也可以把同名变量在控制台配成 Secret 覆盖它。
+	 *
+	 * UPSTREAM_MIRRORS（可选）：回源线路优选，按优先级填写可信加速入口的 JSON 数组，
+	 * 第一项为首选，不配置则直连 GitHub。Workers 无法指定上游 IP（cf.resolveOverride
+	 * 只对自有 zone 生效），所以这里换的是入口 URL；/cacheKey 仍基于原始 GitHub URL，换线路不丢缓存。
 	 */
-	// 回源线路优选：按优先级填写可信加速入口，第一项为首选；不配置则直连 GitHub。
-	// Workers 无法指定上游 IP（cf.resolveOverride 只对自有 zone 生效），
-	// 所以这里换的是入口 URL。/cacheKey 仍基于原始 GitHub URL，换线路不丢缓存。
-	// "vars": {
-	//   "UPSTREAM_MIRRORS": "[\"https://mirror1.example\", \"https://mirror2.example\"]"
-	// }
+	"vars": {
+		"INIT_KEY_SHA256": "06b5f1a985f5122f6eef56c4c83ed9edca47afb3f6f1061a7fe474bbe3ec8c2e"
+		// "UPSTREAM_MIRRORS": "[\"https://mirror1.example\", \"https://mirror2.example\"]"
+	},
 	/**
 	 * Service Bindings (communicate between multiple Workers)
 	 * https://developers.cloudflare.com/workers/configuration/#service-bindings

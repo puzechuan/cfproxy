@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>初始化系统 · GitHub 加速代理</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M6 18h12a4 4 0 0 0 .4-7.98A6 6 0 0 0 6.6 8.2 4.9 4.9 0 0 0 6 18z"/>
+        <path d="M12 9v6m0 0-2.5-2.5M12 15l2.5-2.5"/>
+      </svg>
+    </div>
+    <div>
+      <h1>初始化系统</h1>
+      <div class="sub">首次部署，创建第一个管理员账号</div>
+    </div>
+  </header>
+
+  <section class="card auth-box" id="initCard" hidden>
+    <h2>设置管理员</h2>
+    <p class="notice">
+      这个页面只在系统尚未初始化时出现，成功创建管理员后<b>自动失效</b>。<br>
+      创建管理员需要先输入部署时配置的<b>验证密钥</b>；如果你不是这套服务的部署者，请不要继续操作。
+    </p>
+    <div class="auth-form">
+      <div class="row-field">
+        <label for="initKey">验证密钥</label>
+        <input type="password" id="initKey" autocomplete="off" spellcheck="false" placeholder="部署时配置的初始化验证密钥">
+      </div>
+      <div class="row-field">
+        <label for="initUser">管理员用户名</label>
+        <input type="text" id="initUser" value="admin" autocomplete="username" spellcheck="false" placeholder="3-32 位字母、数字、点、下划线或连字符">
+      </div>
+      <div class="row-field">
+        <label for="initPass">管理员密码</label>
+        <input type="password" id="initPass" autocomplete="new-password" placeholder="至少 8 位，请务必记住">
+      </div>
+      <div class="row-field">
+        <label for="initPass2">确认密码</label>
+        <input type="password" id="initPass2" autocomplete="new-password" placeholder="再输入一次">
+      </div>
+      <button id="initSubmit">完成初始化</button>
+      <p class="msg" id="initMsg"></p>
+      <p class="auth-hint">初始化完成后，其他用户可在登录页自行注册，但只有这个账号拥有管理权限。</p>
+    </div>
+  </section>
+
+  <div class="loading" id="loading">正在检查初始化状态…</div>
+
+  <footer>Cloudflare Workers · GitHub Reverse Proxy · 请遵守 GitHub 服务条款，勿用于滥用流量</footer>
+</div>
+
+<script src="/app.js"></script>
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  function setMsg(text, isErr) {
+    var el = $('initMsg');
+    el.textContent = text;
+    el.className = 'msg ' + (isErr ? 'err' : 'ok');
+  }
+
+  function submit() {
+    var initKey = $('initKey').value.trim();
+    var username = $('initUser').value.trim();
+    var password = $('initPass').value;
+    var confirm = $('initPass2').value;
+
+    if (!initKey) return setMsg('请填写验证密钥', true);
+    if (!username) return setMsg('请填写管理员用户名', true);
+    if (password.length < 8) return setMsg('密码至少 8 位', true);
+    if (password !== confirm) return setMsg('两次输入的密码不一致', true);
+
+    var done = CF.busy($('initSubmit'), '正在初始化…');
+    CF.api('/api/init', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ initKey: initKey, username: username, password: password })
+    }).then(function (out) {
+      if (!out.ok) throw new Error(out.data.error || '初始化失败');
+      $('initKey').value = '';
+      $('initPass').value = '';
+      $('initPass2').value = '';
+      setMsg('初始化完成，正在进入主页面…', false);
+      location.replace('/');
+    }).catch(function (e) {
+      done();
+      setMsg(e.message, true);
+      if (/验证密钥/.test(e.message)) $('initKey').focus();
+    });
+  }
+
+  $('initSubmit').addEventListener('click', submit);
+  $('initKey').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('initUser').focus(); });
+  $('initPass2').addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+
+  // 已初始化就直接回首页（服务端也会拦，这里是体验层兜底）
+  CF.api('/api/init-status').then(function (out) {
+    if (out.ok && out.data.installed) return location.replace('/');
+    $('loading').hidden = true;
+    $('initCard').hidden = false;
+    $('initKey').focus();
+  });
+})();
+</script>
+</body>
+</html>
