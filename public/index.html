@@ -41,7 +41,7 @@
         <button id="convertBtn">生成加速链接</button>
       </div>
       <div class="result" id="resultBox" hidden>
-        <label for="result">加速后的链接（首次下载建议先点「预热缓存」）</label>
+        <label for="result">加速后的链接（会自动预热到边缘缓存，就绪后下载最快）</label>
         <div class="row">
           <input type="text" id="result" readonly>
           <button id="jumpBtn">一键跳转</button>
@@ -53,6 +53,7 @@
           <input type="text" id="clone" readonly>
           <button class="ghost" id="copyCloneBtn">复制</button>
         </div>
+        <p class="warm-state" id="warmState" hidden></p>
       </div>
       <p class="msg" id="msg"></p>
     </section>
@@ -151,6 +152,8 @@
     $('clone').value = 'git clone ' + b + '/' + cloneUrl;
     resultBox.hidden = false;
     setMsg('已生成，复制后即可使用');
+    // 下载类目标：后台自动预热，用户点「一键跳转」时通常已经命中边缘缓存
+    autoWarm(currentTarget);
   }
 
   function copy(text, btn) {
@@ -191,6 +194,55 @@
     } catch (e) { return false; }
   }
 
+  function speedText(bps) {
+    if (!bps) return '';
+    return (bps / 1048576).toFixed(1) + ' MB/s';
+  }
+
+  var warmToken = 0;
+
+  /** 预热：把整份文件写进边缘缓存；之后的分段下载都能在边缘命中，不用回源 */
+  function warmTarget(target, onDone) {
+    var token = ++warmToken;
+    var el = $('warmState');
+    el.hidden = false;
+    el.textContent = '正在预热到边缘缓存…（文件越大越慢，可先下载，后续分段会自动命中）';
+    return fetch(base() + '/__warm?url=' + encodeURIComponent(target), {
+      cache: 'no-store',
+      credentials: 'same-origin'
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (out) {
+        if (token !== warmToken) return;
+        if (!out.ok || !out.data.ok) throw new Error(out.data.error || '预热失败');
+        if (out.data.skipped) {
+          el.textContent = out.data.error || '文件过大，预热已跳过，仍可直接下载';
+          return;
+        }
+        var mb = (out.data.bytes / 1048576).toFixed(1);
+        var sp = speedText(out.data.speed);
+        el.textContent = '边缘缓存已就绪：' + mb + ' MB' +
+          (sp ? '，回源速度 ' + sp : '') +
+          (out.data.cache === 'HIT' ? '，现在下载走边缘命中' : '');
+        if (onDone) onDone(out.data);
+      })
+      .catch(function (e) {
+        if (token === warmToken) el.textContent = '预热未完成（' + e.message + '），仍可直接下载';
+      });
+  }
+
+  /** 生成链接后自动预热（只对下载类目标，避免无谓回源） */
+  function autoWarm(target) {
+    var el = $('warmState');
+    if (!target || !isDownload(target)) {
+      warmToken++;
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    warmTarget(target);
+  }
+
   function warmCache(btn) {
     var target = currentTarget;
     if (!target) return setMsg('请先生成加速链接', true);
@@ -198,19 +250,11 @@
     var old = btn.textContent;
     btn.textContent = '预热中…';
     btn.disabled = true;
-    var endpoint = base() + '/__warm?url=' + encodeURIComponent(target);
-    fetch(endpoint, { cache: 'no-store', credentials: 'same-origin' })
-      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
-      .then(function (out) {
-        if (!out.ok || !out.data.ok) throw new Error(out.data.error || '预热失败');
-        var mb = (out.data.bytes / 1048576).toFixed(1);
-        var hit = out.data.cache === 'HIT' ? '（边缘缓存 HIT）' : '';
-        setMsg('预热完成：' + mb + ' MB' + hit + '，现在下载会优先命中边缘缓存');
-      })
-      .catch(function (e) {
-        setMsg('预热未完成（' + e.message + '），仍可直接下载', true);
-      })
-      .then(function () { btn.textContent = old; btn.disabled = false; });
+    warmTarget(target).then(function () {
+      btn.textContent = old;
+      btn.disabled = false;
+      setMsg('已请求预热，边缘就绪后下载会命中缓存');
+    });
   }
 
   function showUser(user) {

@@ -312,6 +312,58 @@ describe("下载加速与缓存", () => {
 		expect(fetchMock.mock.calls[0][0].redirect).toBe("follow");
 	});
 
+	it("带版本号的 release 下载按不可变内容缓存一年", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response("binary", {
+					status: 200,
+					headers: { "Content-Type": "application/octet-stream" },
+				})
+		);
+		vi.stubGlobal("fetch", fetchMock);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1.2.3/tool.tar.gz",
+				{ headers: { Host: "cfproxy.koomer.site" } }
+			)
+		);
+
+		expect(response.headers.get("cache-control")).toBe(
+			"public, max-age=31536000, immutable"
+		);
+		expect(fetchMock.mock.calls[0][0].cf.cacheTtlByStatus["200-299"]).toBe(31536000);
+	});
+
+	it("分段响应不写浏览器缓存，避免半份对象影响续传", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response("0123456789", {
+						status: 206,
+						headers: {
+							"Content-Range": "bytes 0-9/100",
+							"Content-Length": "10",
+						},
+					})
+			)
+		);
+
+		const response = await call(
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
+				{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
+			)
+		);
+
+		expect(response.status).toBe(206);
+		expect(response.headers.get("cache-control")).toBe("no-store");
+		expect(response.headers.get("content-range")).toBe("bytes 0-9/100");
+		expect(response.headers.get("server-timing")).toContain("upstream;dur=");
+	});
+
+
 	it("直接访问签名资源链接时使用剥离查询串的稳定缓存键", async () => {
 		const fetchMock = vi.fn(async () => new Response("binary", { status: 200 }));
 		vi.stubGlobal("fetch", fetchMock);
@@ -581,6 +633,43 @@ describe("显式预热接口", () => {
 		expect((await r2.json()).ok).toBe(true);
 		// 1 次完整预热 + 2 次 1 字节验证
 		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("超过 400MB 的对象跳过预热，避免白耗带宽", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response("x", {
+						status: 200,
+						headers: { "Content-Length": String(500 * 1024 * 1024) },
+					})
+			)
+		);
+
+		const response = await call(
+			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+
+		const data = await response.json();
+		expect(data.ok).toBe(true);
+		expect(data.skipped).toBe("too_large");
+		expect(data.bytes).toBe(0);
+	});
+
+	it("预热结果带吞吐与机房信息，便于判断慢在哪一段", async () => {
+		stubFetch();
+		const response = await call(
+			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
+				headers: { Host: "cfproxy.koomer.site" },
+			})
+		);
+		const data = await response.json();
+		expect(data.bytes).toBe(6);
+		expect(typeof data.speed).toBe("number");
+		expect(data).toHaveProperty("colo");
 	});
 
 	it("非下载资源拒绝预热", async () => {
