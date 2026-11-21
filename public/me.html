@@ -19,12 +19,7 @@
       <h1>账号设置</h1>
       <div class="sub">查看账号信息、修改登录密码</div>
     </div>
-    <div class="header-actions" id="userBar" hidden>
-      <span class="who" id="who"></span>
-      <a class="btn" href="/admin" id="adminLink" hidden>用户管理</a>
-      <a class="btn" href="/">返回主页</a>
-      <button class="ghost small" id="logoutBtn">退出</button>
-    </div>
+    <div class="header-actions" id="userBar" hidden></div>
   </header>
 
   <div class="loading" id="loading">正在检查登录状态…</div>
@@ -119,23 +114,17 @@
   ['curPass', 'newPass', 'confirmPass'].forEach(function (id) {
     $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
   });
-  $('logoutBtn').addEventListener('click', function () { CF.logout(); });
 
   // 未登录回登录页（服务端同样会拦截，这里是体验层兜底）
   CF.me().then(function (user) {
     if (!user) return CF.toLogin('/me');
-    $('who').innerHTML = '你好，<b></b> <span class="role-tag' +
-      (user.role === 'admin' ? ' admin' : '') + '"></span>';
-    $('who').querySelector('b').textContent = user.username;
-    $('who').querySelector('.role-tag').textContent = user.role === 'admin' ? '管理员' : '用户';
-    $('adminLink').hidden = user.role !== 'admin';
+    CF.userBar(user, { current: 'me' });
     $('infoName').textContent = user.username;
     $('infoRole').textContent = user.role === 'admin' ? '管理员' : '普通用户';
     $('infoCreated').textContent = CF.fmtTime(user.created_at);
     $('infoLogin').textContent = CF.fmtTime(user.last_login);
     $('loading').hidden = true;
     $('mainContent').hidden = false;
-    $('userBar').hidden = false;
     $('curPass').focus();
   });
 })();

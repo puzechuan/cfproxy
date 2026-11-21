@@ -19,11 +19,7 @@
       <h1>优选 IP</h1>
       <div class="sub">挑一个到你最快的 Cloudflare 边缘入口</div>
     </div>
-    <div class="header-actions" id="userBar" hidden>
-      <span class="who" id="who"></span>
-      <a class="btn" id="homeLink" href="/">返回主页</a>
-      <button class="ghost small" id="logoutBtn">退出</button>
-    </div>
+    <div class="header-actions" id="userBar" hidden></div>
   </header>
 
   <div class="loading" id="loading">正在检查登录状态…</div>
@@ -407,14 +403,10 @@
     if (e.key === 'Enter') generate();
   });
 
-  $('logoutBtn').addEventListener('click', function () { CF.logout(); });
-
   CF.me().then(function (user) {
     if (!user) return CF.toLogin('/ip.html');
-    $('who').innerHTML = '已登录 <b></b>';
-    $('who').querySelector('b').textContent = user.username;
+    CF.userBar(user, { current: 'ip' });
     $('loading').hidden = true;
-    $('userBar').hidden = false;
     $('mainContent').hidden = false;
     render();
   });

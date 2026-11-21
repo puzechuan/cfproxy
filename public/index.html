@@ -19,13 +19,7 @@
       <h1>GitHub 加速代理</h1>
       <div class="sub">基于 Cloudflare Workers 的反向代理，边缘缓存加速访问</div>
     </div>
-    <div class="header-actions" id="userBar" hidden>
-      <span class="who" id="who"></span>
-      <a class="btn" href="/ip.html">优选 IP</a>
-      <a class="btn" href="/me">账号</a>
-      <a class="btn" id="adminLink" href="/admin" hidden>用户管理</a>
-      <button class="ghost small" id="logoutBtn">退出</button>
-    </div>
+    <div class="header-actions" id="userBar" hidden></div>
   </header>
 
   <div class="loading" id="loading">正在检查登录状态…</div>
@@ -261,12 +255,11 @@
     currentUser = user;
     $('loading').hidden = true;
     $('mainContent').hidden = false;
-    $('userBar').hidden = false;
-    var isAdmin = user.role === 'admin';
-    $('who').innerHTML = '你好，<b></b> <span class="role-tag' + (isAdmin ? ' admin' : '') + '">' +
-      (isAdmin ? '管理员' : '用户') + '</span>';
-    $('who').querySelector('b').textContent = user.username;
-    $('adminLink').hidden = !isAdmin;
+    // 页头只留「优选 IP」这个功能入口，账号相关都收进用户菜单
+    CF.userBar(user, {
+      current: 'home',
+      nav: [{ text: '优选 IP', href: '/ip.html' }]
+    });
   }
 
   $('convertBtn').addEventListener('click', render);
@@ -275,7 +268,6 @@
   $('copyBtn').addEventListener('click', function () { copy($('result').value, this); });
   $('warmBtn').addEventListener('click', function () { warmCache(this); });
   $('copyCloneBtn').addEventListener('click', function () { copy($('clone').value, this); });
-  $('logoutBtn').addEventListener('click', function () { CF.logout(); });
 
   var links = document.querySelectorAll('.link[data-url]');
   for (var i = 0; i < links.length; i++) {
