@@ -241,6 +241,19 @@ td .muted { color: var(--muted); font-size: 11.5px; }
 .switch:active { transform: none; }
 .switch[disabled] { opacity: .6; cursor: not-allowed; }
 
+/* 命令行入口：登录页与主页共用的脚本下载区 */
+.cli-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+.cli-actions .mono { color: var(--muted); }
+.cli-box { max-width: 530px; margin: 18px auto 0; padding: 26px 30px; }
+.cli-box h2 { justify-content: flex-start; }
+.cli-box .prose { font-size: 12.5px; }
+.cli-hint { font-size: 12px; color: var(--muted); margin: 12px 0 0; }
+.cli-label { margin-top: 16px; }
+/* 命令行示例：长命令允许软换行，免得横向滚动看不到后半截（复制按钮拿到的仍是完整文本） */
+.code.soft { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 主页的命令行卡片：代码块占满卡片宽度，长命令少换行 */
+.cli-card .code-wrap { max-width: none; }
+
 /* 优选 IP 页：说明文字、代码块、IP 胶囊 */
 .prose { font-size: 13.5px; color: var(--muted); line-height: 1.78; max-width: var(--form); margin: 0 0 14px; }
 .prose:last-child { margin-bottom: 0; }

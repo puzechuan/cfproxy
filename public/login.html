@@ -44,6 +44,28 @@
 
   <div class="loading" id="loading">正在检查登录状态…</div>
 
+  <section class="card cli-box">
+    <h2>命令行 / 服务器登录</h2>
+    <p class="prose">
+      没有浏览器的服务器上（无头 Linux、Docker、CI），用这个脚本换一份会话 Cookie：
+      之后 <span class="mono">curl</span>、<span class="mono">wget</span>、<span class="mono">aria2c</span>、<span class="mono">git</span>
+      都能直接复用，不用每次输密码。
+    </p>
+    <div class="cli-actions">
+      <a class="btn solid" href="/cfproxy-login.sh" download>下载 cfproxy-login.sh</a>
+      <span class="mono">bash 脚本 · 约 8 KB</span>
+    </div>
+    <label for="cliCode">在服务器上直接执行（下载 + 登录）</label>
+    <div class="code-wrap">
+      <div class="code-bar"><button class="ghost small" data-cf-copy="cliCode">复制</button></div>
+      <pre class="code soft" id="cliCode"></pre>
+    </div>
+    <p class="cli-hint">
+      密码是交互输入的，不回显、不进 shell 历史；成功后 Cookie 写到
+      <span class="mono">~/.cfproxy.cookie</span>（权限 600，7 天有效）。
+    </p>
+  </section>
+
   <footer>Copyright 2026 CFProxy. All Rights Reserved.</footer>
 </div>
 
@@ -54,6 +76,14 @@
   var mode = 'login';
   var next = CF.safeNext(new URLSearchParams(location.search).get('next'));
   var registrationOpen = true;
+
+  // 命令行入口：按当前域名拼命令，换域名部署或本地调试都不用改代码
+  $('cliCode').textContent = [
+    'curl -fsSLO ' + location.origin + '/cfproxy-login.sh',
+    'chmod +x cfproxy-login.sh',
+    './cfproxy-login.sh -u 你的用户名'
+  ].join('\n');
+  CF.copyBind();
 
   function setMsg(text, isErr) {
     var el = $('authMsg');

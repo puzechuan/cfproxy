@@ -219,5 +219,59 @@
     };
   };
 
+  /**
+   * 复制文本：优先 Clipboard API（需要 HTTPS 或 localhost），
+   * 不可用或被拒时回退到临时 textarea + execCommand。
+   * 返回 Promise<boolean>，false 表示两次都失败，调用方提示用户手动选中。
+   */
+  CF.copyText = function (text) {
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        document.body.removeChild(ta);
+        return ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(
+        function () { return true; },
+        function () { return fallback(); }
+      );
+    }
+    return Promise.resolve(fallback());
+  };
+
+  /**
+   * 给带 data-cf-copy="元素 id" 的按钮统一绑定复制：点一下把目标文本复制走，
+   * 按钮上短暂显示结果。用 data-cf-copy 而不是 .copy，避免和页内已有的复制逻辑互相抢。
+   */
+  CF.copyBind = function () {
+    document.addEventListener('click', function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest('[data-cf-copy]') : null;
+      if (!btn) return;
+      var target = document.getElementById(btn.getAttribute('data-cf-copy'));
+      var text = target ? target.textContent : '';
+      if (!text) return;
+      var label = btn.getAttribute('data-label') || btn.textContent;
+      btn.setAttribute('data-label', label);
+      CF.copyText(text).then(function (ok) {
+        btn.textContent = ok ? '已复制' : '复制失败，请手动选中';
+        setTimeout(function () { btn.textContent = label; }, 1500);
+      });
+    });
+  };
+
   window.CF = CF;
 })();

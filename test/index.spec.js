@@ -241,6 +241,24 @@ describe("代理入口", () => {
 		expect(body).toContain("cfproxy_session");
 		expect(body.includes("\r")).toBe(false);
 	});
+
+	// 登录页与主页都要给出脚本入口：服务器上的人既可以直接下载，
+	// 也能照着页面上的命令一行行抄（命令由前端按当前域名生成）
+	it("登录页与主页都提供脚本下载入口与命令块", async () => {
+		const login = await (
+			await env.ASSETS.fetch(new Request("http://example.com/login.html"))
+		).text();
+		const home = await (
+			await env.ASSETS.fetch(new Request("http://example.com/index.html"))
+		).text();
+		for (const html of [login, home]) {
+			expect(html).toContain('href="/cfproxy-login.sh"');
+			expect(html).toContain("data-cf-copy=");
+			expect(html).toContain("cfproxy-login.sh -u");
+		}
+		expect(login).toContain('id="cliCode"');
+		expect(home).toContain('id="dlCode"');
+	});
 });
 
 describe("重定向处理", () => {

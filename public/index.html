@@ -65,6 +65,42 @@
         <button class="link" data-url="https://github.com/microsoft/vscode/releases">Release 页面<small>大文件下载</small></button>
       </div>
     </section>
+    <section class="card cli-card">
+      <h2>命令行 / 服务器</h2>
+      <p class="prose">
+        在<b>没有浏览器的服务器</b>上用这个脚本登录：它调用 <span class="mono">POST /api/login</span> 换一份会话 Cookie，
+        写到 <span class="mono">~/.cfproxy.cookie</span>（权限 600，7 天有效）。之后
+        <span class="mono">curl</span>、<span class="mono">wget</span>、<span class="mono">aria2c</span>、<span class="mono">git</span>
+        都能直接复用这份凭据，不用反复登录。
+      </p>
+      <div class="cli-actions">
+        <a class="btn solid" href="/cfproxy-login.sh" download>下载 cfproxy-login.sh</a>
+        <span class="mono">bash 脚本 · 约 8 KB · LF 换行，Linux 可直接运行</span>
+      </div>
+
+      <label for="dlCode">1 · 在服务器上下载</label>
+      <div class="code-wrap">
+        <div class="code-bar"><button class="ghost small" data-cf-copy="dlCode">复制</button></div>
+        <pre class="code soft" id="dlCode"></pre>
+      </div>
+
+      <label for="loginCode" class="cli-label">2 · 登录（密码交互输入，不回显）</label>
+      <div class="code-wrap">
+        <div class="code-bar"><button class="ghost small" data-cf-copy="loginCode">复制</button></div>
+        <pre class="code soft" id="loginCode"></pre>
+      </div>
+
+      <label for="useCode" class="cli-label">3 · 之后复用这份 Cookie</label>
+      <div class="code-wrap">
+        <div class="code-bar"><button class="ghost small" data-cf-copy="useCode">复制</button></div>
+        <pre class="code soft" id="useCode"></pre>
+      </div>
+
+      <p class="prose" style="margin-top:16px">
+        脚本参数：<span class="mono">-u 用户名 / -p 密码 / -b 站点 / -f cookie 文件 / -t 只打印 token / -q 安静模式</span>，
+        也支持 <span class="mono">CF_USER</span>、<span class="mono">CF_PASS</span> 等环境变量，方便写进 crontab。
+      </p>
+    </section>
   </main>
 
   <footer>Copyright 2026 CFProxy. All Rights Reserved.</footer>
@@ -97,6 +133,22 @@
   }
 
   function base() { return baseInput.value.trim().replace(/\/+$/, ''); }
+
+  // 命令行卡片：命令按当前站点地址生成，换域名部署或本地调试都不用改代码
+  var CLI_ORIGIN = location.protocol === 'http:' || location.protocol === 'https:'
+    ? location.origin : '';
+  var CLI_SAMPLE = CLI_ORIGIN + '/https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-amd64';
+  var CLI_WGET = CLI_ORIGIN + '/https://github.com/torvalds/linux/archive/refs/heads/master.zip';
+  var CLI_GIT = CLI_ORIGIN + '/https://github.com/octocat/Hello-World.git';
+  $('dlCode').textContent = 'curl -fsSLO ' + CLI_ORIGIN + '/cfproxy-login.sh';
+  $('loginCode').textContent = 'chmod +x cfproxy-login.sh\n./cfproxy-login.sh -u 你的用户名';
+  $('useCode').textContent = [
+    "curl -b ~/.cfproxy.cookie -fLO '" + CLI_SAMPLE + "'",
+    "wget --load-cookies ~/.cfproxy.cookie -c '" + CLI_WGET + "'",
+    'git -c http.extraHeader="Cookie: cfproxy_session=$(./cfproxy-login.sh -t)" clone ' +
+      "'" + CLI_GIT + "'"
+  ].join('\n');
+  CF.copyBind();
 
   function setMsg(text, isErr) {
     msg.textContent = text;
@@ -154,21 +206,12 @@
   }
 
   function copy(text, btn) {
-    var fallback = function () {
-      var ta = document.createElement('textarea');
-      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); } catch (e) {}
-      document.body.removeChild(ta);
-    };
     var done = function () {
       var old = btn.textContent;
       btn.textContent = '已复制';
       setTimeout(function () { btn.textContent = old; }, 1500);
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, function () { fallback(); done(); });
-    } else { fallback(); done(); }
+    CF.copyText(text).then(function (ok) { if (ok) done(); });
   }
 
   function jump() {
