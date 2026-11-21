@@ -98,7 +98,7 @@ cd cfproxy
 npm install
 
 # 建一个本地 D1 并建表（--local 只写本地 .wrangler 状态）
-npx wrangler d1 migrations apply cfproxy-users --local
+npx wrangler d1 migrations apply cfproxy-db --local
 
 npm run dev          # 默认 http://127.0.0.1:8787
 ```
@@ -122,7 +122,7 @@ npm test -- run    # 跑一遍测试
 ### 1. 准备数据库
 
 ```bash
-npx wrangler d1 create cfproxy-users
+npx wrangler d1 create cfproxy-db
 ```
 
 把输出里的 `database_id` 填到 `wrangler.jsonc` 的 `d1_databases[0].database_id`（仓库里写的是作者那套部署的 id，必须换掉）。
@@ -151,7 +151,7 @@ printf '%s' '你的明文密钥' | shasum -a 256     # macOS / Linux
 ### 3. 建表并部署
 
 ```bash
-npx wrangler d1 migrations apply cfproxy-users --remote
+npx wrangler d1 migrations apply cfproxy-db --remote
 npx wrangler deploy
 ```
 
