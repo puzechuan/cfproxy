@@ -128,7 +128,7 @@ TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t cfproxy)" || {
 	exit 1
 }
 # 只删本脚本生成的两个文件再删目录，不用 rm -rf，免得在受限环境里被拦
-trap 'rm -f "$TMP_DIR/body" "$TMP_DIR/cookie" 2>/dev/null; rmdir "$TMP_DIR" 2>/dev/null; true' EXIT
+trap 'rm -f "$TMP_DIR/body" "$TMP_DIR/cookie" "$TMP_DIR/plain" 2>/dev/null; rmdir "$TMP_DIR" 2>/dev/null; true' EXIT
 
 HTTP_CODE="$(
 	curl -sS --max-time 30 -o "$TMP_DIR/body" -w '%{http_code}' \
@@ -162,6 +162,15 @@ cp "$TMP_DIR/cookie" "$COOKIE_FILE" || {
 	exit 1
 }
 chmod 600 "$COOKIE_FILE" 2>/dev/null || true
+
+# curl -c 会把 HttpOnly 的 Cookie 写成 "#HttpOnly_域名" 开头的行，这是 curl 自己的约定：
+# curl 认得这个前缀，wget 却把以 # 开头的行一律当注释跳过，同一份文件在 wget 下就是 401。
+# 去掉前缀（curl 不需要它，wget/aria2c 也就都能认），让 cookie 文件对三者通吃。
+if grep -q '^#HttpOnly_' "$COOKIE_FILE" 2>/dev/null; then
+	awk '{ sub(/^#HttpOnly_/, ""); print }' "$COOKIE_FILE" >"$TMP_DIR/plain" 2>/dev/null &&
+		cp "$TMP_DIR/plain" "$COOKIE_FILE" &&
+		chmod 600 "$COOKIE_FILE" 2>/dev/null
+fi
 # Windows 的 Git Bash / MSYS 上 chmod 基本不生效，属正常，不告警
 case "$(uname -s 2>/dev/null)" in
 	MINGW* | MSYS* | CYGWIN*) ;;
