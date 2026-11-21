@@ -92,7 +92,7 @@
     var wrap = document.createElement('div');
     wrap.className = 'user-menu';
 
-    /* 触发按钮：头像 + 用户名 + 角色，点击展开菜单 */
+    /* 触发按钮：用户名 + 角色，点击展开菜单 */
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'user-btn';
@@ -100,10 +100,6 @@
     btn.setAttribute('aria-expanded', 'false');
     btn.setAttribute('aria-label', '账号菜单：' + name);
     btn.title = name;
-
-    var avatar = document.createElement('span');
-    avatar.className = 'avatar';
-    avatar.textContent = name.trim().charAt(0).toUpperCase();
 
     var nameEl = document.createElement('span');
     nameEl.className = 'user-btn-name';
@@ -113,7 +109,6 @@
     tag.className = 'role-tag' + (isAdmin ? ' admin' : '');
     tag.textContent = roleText;
 
-    btn.appendChild(avatar);
     btn.appendChild(nameEl);
     btn.appendChild(tag);
     btn.insertAdjacentHTML('beforeend', ICONS.chevron);
@@ -127,10 +122,6 @@
 
     var head = document.createElement('div');
     head.className = 'menu-head';
-    var headAvatar = avatar.cloneNode(true);
-    headAvatar.className = 'avatar avatar-lg';
-    var headText = document.createElement('div');
-    headText.className = 'menu-head-text';
     var headName = document.createElement('div');
     headName.className = 'menu-name';
     headName.appendChild(document.createTextNode(name));
@@ -138,10 +129,8 @@
     var headSub = document.createElement('div');
     headSub.className = 'menu-sub';
     headSub.textContent = 'ID ' + (user.id == null ? '—' : user.id);
-    headText.appendChild(headName);
-    headText.appendChild(headSub);
-    head.appendChild(headAvatar);
-    head.appendChild(headText);
+    head.appendChild(headName);
+    head.appendChild(headSub);
     menu.appendChild(head);
 
     function addLink(key, text, href) {

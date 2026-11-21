@@ -7,7 +7,7 @@
 
 ## 本机推送通道
 
-- **代理**：`http://127.0.0.1:12334`（2026-11-21 验证可用，curl 走它访问 github.com 返回 200）。
+- **代理**：`http://127.0.0.1:12334`（2026-11-21 验证可用，curl 走它访问 github.com 返回 200，使用前提醒用户打开hiddify）。
   ```
   git -c http.proxy=http://127.0.0.1:12334 -c https.proxy=http://127.0.0.1:12334 push origin main
   ```
