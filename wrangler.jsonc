@@ -25,7 +25,6 @@
 		{
 			"binding": "DB",
 			"database_name": "cfproxy-db",
-			"database_id": "2d9f90eb-4504-4f59-8e5d-8a024f2971ca",
 			"migrations_dir": "migrations"
 		}
 	],
