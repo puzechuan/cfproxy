@@ -141,7 +141,8 @@
   var CLI_WGET = CLI_ORIGIN + '/https://github.com/torvalds/linux/archive/refs/heads/master.zip';
   var CLI_GIT = CLI_ORIGIN + '/https://github.com/octocat/Hello-World.git';
   $('dlCode').textContent = 'curl -fsSLO ' + CLI_ORIGIN + '/cfproxy-login.sh';
-  $('loginCode').textContent = 'chmod +x cfproxy-login.sh\n./cfproxy-login.sh -u 你的用户名';
+  $('loginCode').textContent = 'chmod +x cfproxy-login.sh\n./cfproxy-login.sh -b ' +
+    CLI_ORIGIN + ' -u 你的用户名';
   $('useCode').textContent = [
     "curl -b ~/.cfproxy.cookie -fLO '" + CLI_SAMPLE + "'",
     "wget --load-cookies ~/.cfproxy.cookie -c '" + CLI_WGET + "'",

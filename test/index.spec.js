@@ -240,6 +240,9 @@ describe("代理入口", () => {
 		expect(body).toContain("/api/login");
 		expect(body).toContain("cfproxy_session");
 		expect(body.includes("\r")).toBe(false);
+		// 脚本里不能写死任何站点域名：自建者的私有地址不该跟着脚本公开出去
+		expect(body).toContain('BASE="${CF_BASE:-}"');
+		expect(body).not.toMatch(/BASE=.*https?:\/\//);
 	});
 
 	// 登录页与主页都要给出脚本入口：服务器上的人既可以直接下载，
@@ -254,7 +257,9 @@ describe("代理入口", () => {
 		for (const html of [login, home]) {
 			expect(html).toContain('href="/cfproxy-login.sh"');
 			expect(html).toContain("data-cf-copy=");
-			expect(html).toContain("cfproxy-login.sh -u");
+			// 脚本不再写死域名，命令里必须带上 -b
+			expect(html).toContain("cfproxy-login.sh -b");
+			expect(html).toContain("-u 你的用户名");
 		}
 		expect(login).toContain('id="cliCode"');
 		expect(home).toContain('id="dlCode"');
@@ -277,7 +282,7 @@ describe("重定向处理", () => {
 
 		const request = new Request(
 			"http://example.com/https://github.com/OpenListTeam/OpenList/releases",
-			{ headers: { Host: "cfproxy.koomer.site" } }
+			{ headers: { Host: "cfproxy.example.com" } }
 		);
 		const response = await call(request);
 
@@ -304,7 +309,7 @@ describe("重定向处理", () => {
 
 		const request = new Request(
 			"http://example.com/https://github.com/OpenListTeam/OpenList/releases/download/v4.2.10/openlist-darwin-amd64.tar.gz",
-			{ headers: { Host: "cfproxy.koomer.site" } }
+			{ headers: { Host: "cfproxy.example.com" } }
 		);
 		const response = await call(request);
 
@@ -335,7 +340,7 @@ describe("下载加速与缓存", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://github.com/OpenListTeam/OpenList/releases/latest/download/tool.tar.gz",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -358,7 +363,7 @@ describe("下载加速与缓存", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://github.com/foo/bar/releases/download/v1.2.3/tool.tar.gz",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -386,7 +391,7 @@ describe("下载加速与缓存", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
-				{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
+				{ headers: { Host: "cfproxy.example.com", Range: "bytes=0-9" } }
 			)
 		);
 
@@ -404,7 +409,7 @@ describe("下载加速与缓存", () => {
 		await call(
 			new Request(
 				"http://example.com/https://release-assets.githubusercontent.com/github-production-release-asset/123/tool.tar.gz?sig=abc&jwt=def",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -435,7 +440,7 @@ describe("下载加速与缓存", () => {
 				"http://example.com/https://github.com/foo/bar/releases/download/v1/tool.tar.gz",
 				{
 					headers: {
-						Host: "cfproxy.koomer.site",
+						Host: "cfproxy.example.com",
 						Range: range,
 						"If-None-Match": "etag-1",
 					},
@@ -486,7 +491,7 @@ describe("下载加速与缓存", () => {
 			withAuth(
 				new Request(
 					"http://example.com/https://github.com/foo/bar/releases/download/v2/big.tar.gz",
-					{ headers: { Host: "cfproxy.koomer.site", Range: "bytes=0-9" } }
+					{ headers: { Host: "cfproxy.example.com", Range: "bytes=0-9" } }
 				)
 			),
 			env,
@@ -506,7 +511,7 @@ describe("异常上游与过期签名", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://raw.githubusercontent.com/a/b/main/file.txt",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -522,7 +527,7 @@ describe("异常上游与过期签名", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=expired",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -539,7 +544,7 @@ describe("异常上游与过期签名", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=expired",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -561,7 +566,7 @@ describe("异常上游与过期签名", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://release-assets.githubusercontent.com/blob/abc?sig=valid",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -582,7 +587,7 @@ describe("GitHub 静态资源代理", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/https://github.githubassets.com/assets/app.js",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -606,11 +611,11 @@ describe("GitHub 静态资源代理", () => {
 		const response = await call(
 			new Request(
 				"https://example.com/https://github.githubassets.com/assets/app.css",
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 		expect(await response.text()).toContain(
-			"https://cfproxy.koomer.site/https://github.githubassets.com/img/bg.png"
+			"https://cfproxy.example.com/https://github.githubassets.com/img/bg.png"
 		);
 	});
 
@@ -620,7 +625,7 @@ describe("GitHub 静态资源代理", () => {
 
 		const response = await call(
 			new Request("http://example.com/https://foo.github.io/index.html", {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 		expect(response.status).toBe(200);
@@ -640,7 +645,7 @@ describe("GitHub 静态资源代理", () => {
 
 		const response = await call(
 			new Request("http://example.com/https://raw.githubusercontent.com/a/b/main/x", {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 		expect(response.headers.get("x-cfproxy-cache")).toBe("HIT");
@@ -673,7 +678,7 @@ describe("显式预热接口", () => {
 		const response = await call(
 			new Request(
 				"http://example.com/__warm?url=" + encodeURIComponent(target),
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 
@@ -694,7 +699,7 @@ describe("显式预热接口", () => {
 		const fetchMock = stubFetch();
 		const make = () =>
 			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			});
 		const ctx1 = createExecutionContext();
 		const ctx2 = createExecutionContext();
@@ -724,7 +729,7 @@ describe("显式预热接口", () => {
 
 		const response = await call(
 			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 
@@ -738,7 +743,7 @@ describe("显式预热接口", () => {
 		stubFetch();
 		const response = await call(
 			new Request("http://example.com/__warm?url=" + encodeURIComponent(target), {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 		const data = await response.json();
@@ -753,7 +758,7 @@ describe("显式预热接口", () => {
 			new Request(
 				"http://example.com/__warm?url=" +
 					encodeURIComponent("https://github.com/foo/bar"),
-				{ headers: { Host: "cfproxy.koomer.site" } }
+				{ headers: { Host: "cfproxy.example.com" } }
 			)
 		);
 		expect(response.status).toBe(400);
@@ -784,18 +789,18 @@ describe("CSP 重写", () => {
 
 		const response = await call(
 			new Request("https://example.com/https://github.com/foo/bar", {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 		const out = response.headers.get("content-security-policy");
 		expect(out).toContain(
-			"style-src 'unsafe-inline' github.githubassets.com https://cfproxy.koomer.site"
+			"style-src 'unsafe-inline' github.githubassets.com https://cfproxy.example.com"
 		);
 		expect(out).toContain(
-			"font-src github.githubassets.com https://cfproxy.koomer.site"
+			"font-src github.githubassets.com https://cfproxy.example.com"
 		);
 		expect(out).toContain(
-			"script-src github.githubassets.com 'sha256-abc' https://cfproxy.koomer.site"
+			"script-src github.githubassets.com 'sha256-abc' https://cfproxy.example.com"
 		);
 		expect(out).toContain("base-uri 'self'");
 		expect(response.headers.get("content-security-policy-report-only")).toBeNull();
@@ -821,7 +826,7 @@ describe("回源线路优选", () => {
 
 	function assetRequest() {
 		return new Request("http://example.com/" + assetUrl, {
-			headers: { Host: "cfproxy.koomer.site" },
+			headers: { Host: "cfproxy.example.com" },
 		});
 	}
 
@@ -898,7 +903,7 @@ describe("内联脚本哈希", () => {
 
 		const response = await call(
 			new Request("https://example.com/https://github.com/foo/bar", {
-				headers: { Host: "cfproxy.koomer.site" },
+				headers: { Host: "cfproxy.example.com" },
 			})
 		);
 		const finalHtml = await response.text();
@@ -915,7 +920,7 @@ describe("内联脚本哈希", () => {
 		const out = response.headers.get("content-security-policy");
 
 		expect(finalHtml).toContain(
-			"https://cfproxy.koomer.site/https://github.com/foo/bar"
+			"https://cfproxy.example.com/https://github.com/foo/bar"
 		);
 		expect(out).not.toContain(oldHash);
 		expect(out).toContain(expected);
@@ -938,12 +943,12 @@ describe("内容链接重写", () => {
 		);
 
 		const request = new Request("https://example.com/https://raw.githubusercontent.com/a/b/main/readme.md", {
-			headers: { Host: "cfproxy.koomer.site" },
+			headers: { Host: "cfproxy.example.com" },
 		});
 		const response = await call(request);
 		const html = await response.text();
 
-		expect(html).toContain("https://cfproxy.koomer.site/https://github.com/foo/bar");
+		expect(html).toContain("https://cfproxy.example.com/https://github.com/foo/bar");
 		expect(html).not.toContain("http://example.com/https://github.com");
 		// 文本被改写后原 Content-Length 已失效，必须移除
 		expect(response.headers.get("content-length")).toBeNull();

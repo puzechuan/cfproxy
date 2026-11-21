@@ -9,7 +9,7 @@
 # 会话有效期 7 天（服务端 SESSION_TTL），过期重跑一次即可。
 #
 # 服务器上直接取用：
-#   curl -fsSLO https://cfproxy.koomer.site/cfproxy-login.sh && chmod +x cfproxy-login.sh
+#   curl -fsSLO https://你的域名/cfproxy-login.sh && chmod +x cfproxy-login.sh
 #
 # 用法：
 #   ./cfproxy-login.sh                             # 交互输入用户名和密码
@@ -20,7 +20,7 @@
 # 参数：
 #   -u 用户名    默认 $CF_USER，缺省则交互询问
 #   -p 密码      默认 $CF_PASS，缺省则静默提示（写在命令行会进 shell history，不推荐）
-#   -b 站点地址  默认 $CF_BASE，缺省 https://cfproxy.koomer.site
+#   -b 站点地址  必填，也可用环境变量 $CF_BASE（脚本里不写死任何域名）
 #   -f cookie文件 默认 $CF_COOKIE，缺省 ~/.cfproxy.cookie
 #   -t 只打印 token（用于拼 git 的 extraHeader）
 #   -q 安静模式   成功时不输出任何内容
@@ -30,7 +30,7 @@
 
 set -u
 
-BASE="${CF_BASE:-https://cfproxy.koomer.site}"
+BASE="${CF_BASE:-}"
 COOKIE_FILE="${CF_COOKIE:-$HOME/.cfproxy.cookie}"
 USER_NAME="${CF_USER:-}"
 PASSWORD="${CF_PASS:-}"
@@ -45,7 +45,7 @@ cfproxy 登录脚本
 
   -u 用户名     也可用环境变量 CF_USER
   -p 密码       也可用环境变量 CF_PASS；不传则静默提示输入
-  -b 站点地址   默认 https://cfproxy.koomer.site
+  -b 站点地址   必填（或用环境变量 CF_BASE），例如 https://你的域名
   -f cookie文件 默认 ~/.cfproxy.cookie（权限会被设成 600）
   -t 只打印当前文件里的会话 token，不发起登录
   -q 安静模式   成功时不输出（只报错），适合 cron
@@ -101,6 +101,19 @@ command -v curl >/dev/null 2>&1 || {
 	echo "缺少 curl，请先安装" >&2
 	exit 1
 }
+
+# 站点地址不写死在脚本里：要么 -b 传，要么走环境变量，避免把私有域名带进公开仓库
+if [ -z "$BASE" ]; then
+	echo "缺少站点地址：用 -b https://你的域名 指定，或设置环境变量 CF_BASE" >&2
+	exit 2
+fi
+case "$BASE" in
+	http://* | https://*) ;;
+	*)
+		echo "站点地址要以 http:// 或 https:// 开头：$BASE" >&2
+		exit 2
+		;;
+esac
 
 if [ -z "$USER_NAME" ]; then
 	printf '用户名: ' >&2
