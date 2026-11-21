@@ -226,6 +226,21 @@ describe("代理入口", () => {
 		const response = await call(new Request("http://example.com/https://evil.example.com/x"));
 		expect(response.status).toBe(400);
 	});
+
+	// 无浏览器环境的登录脚本：必须能直接下载，且只能是 LF——
+	// CRLF 会让 shebang 变成 "bash\r"，在 Linux 上直接跑不起来。
+	// 这里直接问静态资源绑定：线上 .sh 不走 Worker，由 assets 直接吐文件
+	it("登录脚本可直接下载，且换行是 LF", async () => {
+		const response = await env.ASSETS.fetch(
+			new Request("http://example.com/cfproxy-login.sh")
+		);
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(body.startsWith("#!/usr/bin/env bash")).toBe(true);
+		expect(body).toContain("/api/login");
+		expect(body).toContain("cfproxy_session");
+		expect(body.includes("\r")).toBe(false);
+	});
 });
 
 describe("重定向处理", () => {
