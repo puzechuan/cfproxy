@@ -54,7 +54,7 @@
         </table>
       </div>
       <p class="msg" id="msg"></p>
-      <p class="auth-hint" style="margin-top:10px">禁用账号会立即失效该用户已登录的会话；重置密码后请通知对应用户。</p>
+      <p class="auth-hint" style="margin-top:10px">禁用账号会立即失效该用户已登录的会话；重置密码后请通知对应用户；删除会把记录彻底移除，无法恢复，也不能删除自己。</p>
     </section>
   </main>
 
@@ -197,7 +197,7 @@
     var wrap = document.createElement('div');
     wrap.className = 'admin-actions';
 
-    // 不能禁用自己，避免把自己锁在门外
+    // 不能禁用/删除自己，避免把自己锁在门外
     if (user.username !== currentUser.username) {
       var toggle = document.createElement('button');
       toggle.className = 'ghost small';
@@ -218,6 +218,22 @@
       adminAction('/api/admin/reset', { id: user.id, password: np }, reset);
     });
     wrap.appendChild(reset);
+
+    // 删除不可恢复，二次确认里把后果说清楚
+    if (user.username !== currentUser.username) {
+      var del = document.createElement('button');
+      del.className = 'danger small';
+      del.textContent = '删除';
+      del.addEventListener('click', function () {
+        var ok = window.confirm(
+          '确定删除用户「' + user.username + '」？\n\n' +
+          '该账号的登录状态会立即失效，记录从数据库里彻底移除，无法恢复。'
+        );
+        if (!ok) return;
+        adminAction('/api/admin/delete', { id: user.id }, del);
+      });
+      wrap.appendChild(del);
+    }
 
     actionCell.appendChild(wrap);
 

@@ -673,6 +673,39 @@ async function handleAdminReset(request, env) {
   return json({ ok: true });
 }
 
+/**
+ * 删除用户（不可恢复）。
+ *
+ * 只拦一种情况：删自己。这既防止管理员把自己锁在门外，也顺带保证了
+ * 「最后一个管理员」删不掉——系统里只剩一个管理员时，能发起删除的只能是
+ * 这个管理员本人，会被下面的判断挡住。
+ * 被删用户的行没了，签名 Cookie 虽然还在，但 getUser / getUserForProxy
+ * 都按 id 回查数据库，查不到就当未登录，会话与代理权限一起立刻失效。
+ */
+async function handleAdminDelete(request, env, currentUser) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    return json({ ok: false, error: "请求格式错误" }, 400);
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return json({ ok: false, error: "无效的用户编号" }, 400);
+  }
+  if (currentUser && id === currentUser.id) {
+    return json({ ok: false, error: "不能删除当前登录的账号" }, 400);
+  }
+  const result = await env.DB.prepare("DELETE FROM users WHERE id = ?")
+    .bind(id)
+    .run();
+  if (!result.success || !result.meta || result.meta.changes === 0) {
+    return json({ ok: false, error: "用户不存在" }, 404);
+  }
+  invalidateProxyUserCache();
+  return json({ ok: true });
+}
+
 async function handleAdminGetSettings(env) {
   return json({
     ok: true,
@@ -762,6 +795,9 @@ export async function handleAuthApi(request, env, path) {
     }
     if (path === "/api/admin/reset" && method === "POST") {
       return handleAdminReset(request, env);
+    }
+    if (path === "/api/admin/delete" && method === "POST") {
+      return handleAdminDelete(request, env, user);
     }
     if (path === "/api/admin/settings" && method === "GET") {
       return handleAdminGetSettings(env);

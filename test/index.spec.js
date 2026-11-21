@@ -1263,6 +1263,99 @@ describe("用户系统 · 管理员", () => {
 		// 更新会话 Cookie 供后续测试使用
 		sessionCookie = (relogin.headers.get("set-cookie") || "").split(";")[0];
 	});
+
+	it("管理员可以删除用户，删除后会话与代理入口立即失效", async () => {
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
+		const authed = (path, init) => {
+			const req = new Request("http://example.com" + path, init);
+			req.headers.set("cookie", adminCookie);
+			return req;
+		};
+		const deleteReq = (id) =>
+			authed("/api/admin/delete", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ id }),
+			});
+
+		// 造一个待删除的账号，并留下它自己的会话
+		const reg = await api(
+			jsonRequest("/api/register", { username: "delme", password: "password123" }),
+			ae
+		);
+		expect(reg.status).toBe(200);
+		const victimCookie = (reg.headers.get("set-cookie") || "").split(";")[0];
+
+		const list = await (await api(authed("/api/admin/users"), ae)).json();
+		const victim = list.users.find((u) => u.username === "delme");
+		expect(victim).toBeDefined();
+
+		const del = await api(deleteReq(victim.id), ae);
+		expect(del.status).toBe(200);
+
+		// 账号行被删掉后，签名 Cookie 虽然还在，但回查不到用户，处处当未登录
+		const me = await api(
+			new Request("http://example.com/api/me", { headers: { cookie: victimCookie } }),
+			ae
+		);
+		expect(me.status).toBe(401);
+
+		const proxy = await api(
+			new Request(
+				"http://example.com/https://github.com/foo/bar/releases/download/v1/x.zip",
+				{ headers: { cookie: victimCookie } }
+			),
+			ae
+		);
+		expect(proxy.status).toBe(401);
+
+		// 列表里也没有了，重复删除返回 404
+		const after = await (await api(authed("/api/admin/users"), ae)).json();
+		expect(after.users.some((u) => u.username === "delme")).toBe(false);
+		const again = await api(deleteReq(victim.id), ae);
+		expect(again.status).toBe(404);
+	});
+
+	it("管理员不能删除自己", async () => {
+		const ae = env;
+		const adminCookie = await adminSessionCookie();
+		const me = await api(
+			new Request("http://example.com/api/me", { headers: { cookie: adminCookie } }),
+			ae
+		);
+		const selfId = (await me.json()).user.id;
+
+		const req = new Request("http://example.com/api/admin/delete", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ id: selfId }),
+		});
+		req.headers.set("cookie", adminCookie);
+		const res = await api(req, ae);
+		expect(res.status).toBe(400);
+		expect((await res.json()).error).toContain("不能删除");
+
+		// 自己还能正常访问管理接口，说明没被误删
+		const still = await api(
+			(() => { const r = new Request("http://example.com/api/admin/users"); r.headers.set("cookie", adminCookie); return r; })(),
+			ae
+		);
+		expect(still.status).toBe(200);
+	});
+
+	it("普通用户无权删除账号", async () => {
+		const res = await api(
+			withAuth(
+				new Request("http://example.com/api/admin/delete", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ id: 1 }),
+				})
+			)
+		);
+		expect(res.status).toBe(403);
+	});
 });
 
 describe("账号设置页 /me", () => {
