@@ -7,6 +7,17 @@
 - **可以使用 playwright**：使用后不要删除，不然一直删除又下载，非常麻烦
 - **推送后用 `/health` 检测部署状态**：`curl -s https://cfproxy.koomer.site/health` 看服务是否正常；再从线上静态资源（如 `/app.css`、`/app.js`）确认新版本的文件内容已生效。
 
+## 本地测试账号（以后统一用它）
+
+- 用户名 `testadmin`，密码 `test12345`，角色 **管理员**，本地 dev D1 里的 id 是 13。
+- 只存在于 `wrangler dev` 用的本地 D1（`.wrangler/state/v3`，不入库），**线上没有这个账号**。
+- 用法：`npx wrangler dev --port 8799 --ip 127.0.0.1`，然后
+  `curl -c /tmp/tj.txt -X POST http://127.0.0.1:8799/api/login -H 'content-type: application/json' -d '{"username":"testadmin","password":"test12345"}'`，
+  之后带 `-b /tmp/tj.txt` 访问 `/admin`、`/api/admin/*`。
+- 本地 D1 被清空/重建时（`.wrangler` 删掉、换机器），用 `/api/register` 注册同名账号再
+  `npx wrangler d1 execute cfproxy-users --local --command "UPDATE users SET role='admin' WHERE username='testadmin'"` 提权即可。
+- 需要「普通用户」视角时，临时注册一个普通账号（或把此账号 role 改回 user），验证完删掉；别把 testadmin 的密码/角色改坏。
+
 ## 本机推送通道
 
 - **代理**：`http://127.0.0.1:12334`（2026-11-21 验证可用，curl 走它访问 github.com 返回 200，使用前提醒用户打开hiddify）。
