@@ -61,9 +61,8 @@
       <pre class="code soft" id="cliCode"></pre>
     </div>
     <p class="cli-hint">
-      密码是交互输入的，不回显、不进 shell 历史；成功后 Cookie 写到
-      <span class="mono">~/.cfproxy.cookie</span>（权限 600，7 天有效）。
-      命令里的 <span class="mono">-b</span> 是本页地址，换到别的服务器执行时照抄即可。
+      运行时脚本会先问你站点地址（填本页域名即可），密码是交互输入的，不回显、不进 shell 历史；
+      成功后 Cookie 写到 <span class="mono">~/.cfproxy.cookie</span>（权限 600，7 天有效）。
     </p>
   </section>
 
@@ -82,7 +81,7 @@
   $('cliCode').textContent = [
     'curl -fsSLO ' + location.origin + '/cfproxy-login.sh',
     'chmod +x cfproxy-login.sh',
-    './cfproxy-login.sh -b ' + location.origin + ' -u 你的用户名'
+    './cfproxy-login.sh -u 你的用户名'
   ].join('\n');
   CF.copyBind();
 

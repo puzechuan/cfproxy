@@ -12,7 +12,7 @@
 #   curl -fsSLO https://你的域名/cfproxy-login.sh && chmod +x cfproxy-login.sh
 #
 # 用法：
-#   ./cfproxy-login.sh                             # 交互输入用户名和密码
+#   ./cfproxy-login.sh                             # 依次询问站点地址、用户名、密码
 #   CF_USER=me CF_PASS='***' ./cfproxy-login.sh -q  # 定时任务 / CI（-q 只输出错误）
 #   ./cfproxy-login.sh -u me -b https://你的域名 -f /root/.cfproxy.cookie
 #   ./cfproxy-login.sh -t                          # 只打印当前 Cookie 里的 token
@@ -20,7 +20,7 @@
 # 参数：
 #   -u 用户名    默认 $CF_USER，缺省则交互询问
 #   -p 密码      默认 $CF_PASS，缺省则静默提示（写在命令行会进 shell history，不推荐）
-#   -b 站点地址  必填，也可用环境变量 $CF_BASE（脚本里不写死任何域名）
+#   -b 站点地址  可省略，缺省时交互询问；也可用环境变量 $CF_BASE
 #   -f cookie文件 默认 $CF_COOKIE，缺省 ~/.cfproxy.cookie
 #   -t 只打印 token（用于拼 git 的 extraHeader）
 #   -q 安静模式   成功时不输出任何内容
@@ -45,7 +45,7 @@ cfproxy 登录脚本
 
   -u 用户名     也可用环境变量 CF_USER
   -p 密码       也可用环境变量 CF_PASS；不传则静默提示输入
-  -b 站点地址   必填（或用环境变量 CF_BASE），例如 https://你的域名
+  -b 站点地址   可省略，缺省时提示输入；也可用环境变量 CF_BASE
   -f cookie文件 默认 ~/.cfproxy.cookie（权限会被设成 600）
   -t 只打印当前文件里的会话 token，不发起登录
   -q 安静模式   成功时不输出（只报错），适合 cron
@@ -102,9 +102,14 @@ command -v curl >/dev/null 2>&1 || {
 	exit 1
 }
 
-# 站点地址不写死在脚本里：要么 -b 传，要么走环境变量，避免把私有域名带进公开仓库
+# 站点地址不写死在脚本里（私有域名不该随脚本公开），缺省时问一句
 if [ -z "$BASE" ]; then
-	echo "缺少站点地址：用 -b https://你的域名 指定，或设置环境变量 CF_BASE" >&2
+	printf '站点地址（例如 https://你的域名）: ' >&2
+	IFS= read -r BASE || true
+	BASE="${BASE%/}"
+fi
+if [ -z "$BASE" ]; then
+	echo "没有站点地址：请重新运行并输入，或用 -b / 环境变量 CF_BASE 指定" >&2
 	exit 2
 fi
 case "$BASE" in

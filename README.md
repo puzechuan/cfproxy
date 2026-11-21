@@ -195,8 +195,9 @@ git clone https://你的域名/https://github.com/user/repo.git
 curl -fsSLO https://你的域名/cfproxy-login.sh
 chmod +x cfproxy-login.sh
 
-# 登录：密码交互输入，不回显；Cookie 写到 ~/.cfproxy.cookie（权限 600，7 天有效）
-./cfproxy-login.sh -b https://你的域名 -u 你的用户名
+# 登录：依次询问站点地址、用户名、密码（密码不回显）
+# Cookie 写到 ~/.cfproxy.cookie（权限 600，7 天有效）
+./cfproxy-login.sh
 
 # 之后
 curl -b ~/.cfproxy.cookie -fLO 'https://你的域名/https://github.com/user/repo/releases/download/v1/x.zip'
@@ -209,12 +210,12 @@ wget --load-cookies ~/.cfproxy.cookie -c 'https://你的域名/https://github.co
 | --- | --- | --- |
 | `-u` | 用户名，缺省则交互询问 | `CF_USER` |
 | `-p` | 密码，缺省则静默提示 | `CF_PASS` |
-| `-b` | 站点地址（必填），如 `https://你的域名` | `CF_BASE` |
+| `-b` | 站点地址，缺省则交互询问 | `CF_BASE` |
 | `-f` | Cookie 文件，默认 `~/.cfproxy.cookie` | `CF_COOKIE` |
 | `-t` | 只打印会话 token（给 git 的 `extraHeader` 用） | |
 | `-q` | 安静模式，适合 cron / CI | |
 
-> 脚本里不写死任何域名：站点地址必须由 `-b` 或环境变量 `CF_BASE` 给出，漏了会直接报错退出。网页上的命令块已经按当前地址填好，复制即可。
+> 脚本里不写死任何域名：站点地址由 `-b`、环境变量 `CF_BASE` 或交互提示给出。只跑 `./cfproxy-login.sh` 的话，脚本会挨个问站点地址、用户名、密码；写 cron 时用 `CF_BASE` 免得卡在提示上。
 
 写进 crontab 的例子（每天续一次会话）：
 

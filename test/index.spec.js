@@ -243,6 +243,8 @@ describe("代理入口", () => {
 		// 脚本里不能写死任何站点域名：自建者的私有地址不该跟着脚本公开出去
 		expect(body).toContain('BASE="${CF_BASE:-}"');
 		expect(body).not.toMatch(/BASE=.*https?:\/\//);
+		// 缺省时先问站点地址，而不是直接报错退出
+		expect(body).toContain("站点地址（例如 https://你的域名）");
 	});
 
 	// 登录页与主页都要给出脚本入口：服务器上的人既可以直接下载，
@@ -257,9 +259,8 @@ describe("代理入口", () => {
 		for (const html of [login, home]) {
 			expect(html).toContain('href="/cfproxy-login.sh"');
 			expect(html).toContain("data-cf-copy=");
-			// 脚本不再写死域名，命令里必须带上 -b
-			expect(html).toContain("cfproxy-login.sh -b");
-			expect(html).toContain("-u 你的用户名");
+			// 脚本不写死域名、缺省交互询问，所以命令里不需要带 -b
+			expect(html).toContain("cfproxy-login.sh -u 你的用户名");
 		}
 		expect(login).toContain('id="cliCode"');
 		expect(home).toContain('id="dlCode"');
