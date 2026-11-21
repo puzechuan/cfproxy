@@ -4,6 +4,8 @@
 
 - **`git push` 之前必须先问用户确认**。可以自行修改代码、跑测试、本地 `git commit`，但推出远程一律先停下来问一句「要推送吗？」。
 - **推送即部署，不需要再手动 `wrangler deploy`**：仓库已接 Cloudflare 自动构建，`main` 有新提交就自动上线（2026-11-21 用户明确说明）。所以推送前那句确认，同时也是「要不要发布到线上」的确认；除非用户单独要求，不要主动跑 `wrangler deploy`。
+- **不要使用 playwright**：验证页面效果不要再起 playwright/浏览器自动化，改用 `curl`、`vitest`，或直接请用户看线上效果。
+- **推送后用 `/health` 检测部署状态**：`curl -s https://cfproxy.koomer.site/health` 看服务是否正常；再从线上静态资源（如 `/app.css`、`/app.js`）确认新版本的文件内容已生效。
 
 ## 本机推送通道
 
