@@ -4,7 +4,6 @@
 
 自带完整用户系统（注册 / 登录 / 改密 / 禁用 / 删除）、首次部署初始化、管理员控制台，以及一个给**无浏览器服务器**用的登录脚本。
 
-- 演示站：<https://cfproxy.koomer.site>
 - 运行时：Cloudflare Workers + D1 + 静态资源（Assets）
 - 测试：`npx vitest run` → 76 项通过
 
@@ -51,7 +50,7 @@
 
 ## 页面示例
 
-> 截图取自演示站与本地实例，命令里的域名会随部署地址自动变化。
+> 截图取自本地实例，命令里的地址会随部署地址自动变化。
 
 ### 主页 · 链接转换
 
@@ -106,7 +105,7 @@ npm run dev          # 默认 http://127.0.0.1:8787
 
 打开 <http://127.0.0.1:8787/init.html>，填初始化密钥与管理员账号即可开始用。
 
-> 仓库里的 `INIT_KEY_SHA256` 是演示站自己的密钥摘要，**本地跑之前先换成你自己的**（生成方法见下面「部署」第 2 步），否则你不知道能通过校验的明文是什么。
+> 仓库里的 `INIT_KEY_SHA256` 是作者自己部署时用的摘要，**自建前先换成你自己的**（生成方法见下面「部署」第 2 步），否则你不知道能通过校验的明文是什么。
 
 常用命令：
 
@@ -126,7 +125,7 @@ npm test -- run    # 跑一遍测试
 npx wrangler d1 create cfproxy-users
 ```
 
-把输出里的 `database_id` 填到 `wrangler.jsonc` 的 `d1_databases[0].database_id`（仓库里现在写的是演示站自己的 id，必须换掉）。
+把输出里的 `database_id` 填到 `wrangler.jsonc` 的 `d1_databases[0].database_id`（仓库里写的是作者那套部署的 id，必须换掉）。
 
 ### 2. 设置初始化密钥
 
@@ -197,7 +196,7 @@ curl -fsSLO https://你的域名/cfproxy-login.sh
 chmod +x cfproxy-login.sh
 
 # 登录：密码交互输入，不回显；Cookie 写到 ~/.cfproxy.cookie（权限 600，7 天有效）
-./cfproxy-login.sh -u 你的用户名
+./cfproxy-login.sh -b https://你的域名 -u 你的用户名
 
 # 之后
 curl -b ~/.cfproxy.cookie -fLO 'https://你的域名/https://github.com/user/repo/releases/download/v1/x.zip'
@@ -210,17 +209,17 @@ wget --load-cookies ~/.cfproxy.cookie -c 'https://你的域名/https://github.co
 | --- | --- | --- |
 | `-u` | 用户名，缺省则交互询问 | `CF_USER` |
 | `-p` | 密码，缺省则静默提示 | `CF_PASS` |
-| `-b` | 站点地址，默认 `https://cfproxy.koomer.site` | `CF_BASE` |
+| `-b` | 站点地址（必填），如 `https://你的域名` | `CF_BASE` |
 | `-f` | Cookie 文件，默认 `~/.cfproxy.cookie` | `CF_COOKIE` |
 | `-t` | 只打印会话 token（给 git 的 `extraHeader` 用） | |
 | `-q` | 安静模式，适合 cron / CI | |
 
-> `-b` 的默认值是演示站地址；自建时用 `-b https://你的域名` 或环境变量 `CF_BASE` 指定，也可以直接改脚本里的 `BASE` 默认值。
+> 脚本里不写死任何域名：站点地址必须由 `-b` 或环境变量 `CF_BASE` 给出，漏了会直接报错退出。网页上的命令块已经按当前地址填好，复制即可。
 
 写进 crontab 的例子（每天续一次会话）：
 
 ```cron
-0 4 * * * CF_USER=me CF_PASS=*** /opt/cfproxy-login.sh -q
+0 4 * * * CF_BASE=https://你的域名 CF_USER=me CF_PASS=*** /opt/cfproxy-login.sh -q
 ```
 
 ### git 需要带 Cookie 时

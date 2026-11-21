@@ -165,3 +165,6 @@ dist
 .env*
 !.env.example
 .wrangler/
+
+# 本地工作记忆（含测试账号等私有信息，不进仓库）
+.workbuddy/
