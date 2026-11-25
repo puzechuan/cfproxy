@@ -47,7 +47,7 @@
       <h2>第一步 · 测出最快的入口</h2>
       <p class="prose">
         浏览器测不了这件事：对裸 IP 发 HTTPS 请求时证书和 Host 都对不上，浏览器会直接拒绝，
-        所以必须在命令行跑。下面两段脚本做的事一样——对每个候选 IP 测一次 TCP 握手（端口 443），
+        所以必须在命令行跑。下面两个平台的脚本做的事一样——对每个候选 IP 测一次 TCP 握手（端口 443），
         时延越小越好，超时的直接淘汰。
       </p>
       <p class="prose">Windows —— 下载脚本，双击运行，不用改任何设置：</p>
@@ -55,10 +55,15 @@
         <button id="dlBatBtn">下载测速脚本（.bat）</button>
         <span class="msg" id="batMsg" style="margin:0;align-self:center"></span>
       </div>
-      <p class="prose" style="margin-top:16px">macOS / Linux：</p>
+      <p class="prose" style="margin-top:16px">macOS / Linux —— 下载脚本后在终端运行：</p>
+      <div class="field" style="max-width:var(--form);margin-bottom:14px">
+        <a class="btn solid" href="/cf-ip-test.sh" download>下载测速脚本（.sh）</a>
+        <span class="mono">bash 脚本 · 约 2 KB</span>
+      </div>
+      <p class="prose">或者直接用 curl 下载并运行：</p>
       <div class="code-wrap">
-        <div class="code-bar"><button class="ghost small copy" data-copy="shCode">复制</button></div>
-        <pre class="code" id="shCode"></pre>
+        <div class="code-bar"><button class="ghost small copy" data-copy="shCurlCode">复制</button></div>
+        <pre class="code" id="shCurlCode"></pre>
       </div>
       <p class="msg" id="copyMsg"></p>
     </section>
@@ -200,19 +205,6 @@
   }
 
 
-  function shScript() {
-    return [
-      "HOST=" + HOST,
-      "",
-      "for ip in " + IPS.join(' ') + "; do",
-      "  r=$(curl -s -o /dev/null --noproxy '*' --max-time 3 \\",
-      "        -w '%{http_code} %{time_connect}' \\",
-      "        --resolve \"$HOST:443:$ip\" \"https://$HOST/health\" 2>/dev/null)",
-      "  echo \"$r $ip\"",
-      "done | awk '$1 == 200 { printf \"%4.0f ms  %s\\n\", $2 * 1000, $3 }' | sort -n | head -5"
-    ].join('\n');
-  }
-
   /**
    * 生成可双击运行的 .bat。
    * 刻意全部使用 ASCII：批处理里的中文在不同代码页下极易变成乱码，
@@ -281,7 +273,9 @@
 
   function render() {
     $('ipCount').textContent = String(IPS.length);
-    $('shCode').textContent = shScript();
+    $('shCurlCode').textContent =
+      'curl -fsSLO ' + location.origin + '/cf-ip-test.sh\n' +
+      'bash cf-ip-test.sh ' + HOST;
 
     var grid = $('ipGrid');
     grid.innerHTML = '';
