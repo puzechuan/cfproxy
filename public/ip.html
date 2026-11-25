@@ -55,21 +55,7 @@
         <button id="dlBatBtn">下载测速脚本（.bat）</button>
         <span class="msg" id="batMsg" style="margin:0;align-self:center"></span>
       </div>
-      <p class="prose">
-        脚本只做一件事：对本页列出的每个 IP 测一次 443 端口握手，按快慢排序取前 5，然后停下来等你按键。
-        它不写注册表、不改任何设置、不需要管理员权限，测完关掉窗口就行。
-      </p>
-      <p class="prose">
-        下载时 Chrome 可能提示「不常下载，可能存在危险」，选<b>保留</b>；
-        第一次运行可能被 SmartScreen 拦一下（「Windows 已保护你的电脑」）——点<b>更多信息</b> → <b>仍要运行</b>。
-        这两处都是因为它是从网上下载的 .bat 文件，不是脚本本身有问题。
-      </p>
-      <p class="prose" style="margin-top:16px">不想下载文件的话，也可以把这行命令复制到 PowerShell 里直接跑：</p>
-      <div class="code-wrap">
-        <div class="code-bar"><button class="ghost small copy" data-copy="psCode">复制</button></div>
-        <pre class="code" id="psCode"></pre>
-      </div>
-      <p class="prose" style="margin-top:16px">macOS / Linux（bash + curl）：</p>
+      <p class="prose" style="margin-top:16px">macOS / Linux：</p>
       <div class="code-wrap">
         <div class="code-bar"><button class="ghost small copy" data-copy="shCode">复制</button></div>
         <pre class="code" id="shCode"></pre>
@@ -213,25 +199,6 @@
     return IPS.map(function (ip) { return "'" + ip + "'"; }).join(',');
   }
 
-  function psScript() {
-    return [
-      "$ips = @(" + quotedList() + ")",
-      "",
-      "$rows = foreach ($ip in $ips) {",
-      "  $c = New-Object Net.Sockets.TcpClient",
-      "  $sw = [Diagnostics.Stopwatch]::StartNew()",
-      "  $ok = $false",
-      "  try {",
-      "    $t = $c.ConnectAsync($ip, 443)",
-      "    $ok = $t.Wait(2000)",
-      "  } catch { }",
-      "  finally { $c.Dispose() }",
-      "  if ($ok) { [pscustomobject]@{ IP = $ip; MS = [int]$sw.ElapsedMilliseconds } }",
-      "}",
-      "",
-      "$rows | Sort-Object MS | Select-Object -First 5 | Format-Table -AutoSize"
-    ].join('\n');
-  }
 
   function shScript() {
     return [
@@ -314,7 +281,6 @@
 
   function render() {
     $('ipCount').textContent = String(IPS.length);
-    $('psCode').textContent = psScript();
     $('shCode').textContent = shScript();
 
     var grid = $('ipGrid');
