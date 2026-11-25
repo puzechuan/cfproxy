@@ -49,13 +49,15 @@
         浏览器测不了这件事：对裸 IP 发 HTTPS 请求时证书和 Host 都对不上，浏览器会直接拒绝，
         所以必须在命令行跑。下面两个平台的脚本做的事一样——对每个候选 IP 测一次 TCP 握手（端口 443），
         时延越小越好，超时的直接淘汰。
+        脚本每次运行都会从 <span class="mono">cloudflare.com/ips-v4</span> 重新取官方段；
+        取不到就用上次缓存的段，再取不到才用内置历史段。
       </p>
-      <p class="prose">Windows —— 下载脚本，双击运行，不用改任何设置：</p>
+      <p class="prose">Windows —— 下载脚本，双击运行</p>
       <div class="field" style="max-width:var(--form);margin-bottom:14px">
         <button id="dlBatBtn">下载测速脚本（.bat）</button>
         <span class="msg" id="batMsg" style="margin:0;align-self:center"></span>
       </div>
-      <p class="prose" style="margin-top:16px">macOS / Linux —— 下载脚本后在终端运行：</p>
+      <p class="prose" style="margin-top:16px">macOS / Linux —— 下载脚本后在终端运行</p>
       <div class="field" style="max-width:var(--form);margin-bottom:14px">
         <a class="btn solid" href="/cf-ip-test.sh" download>下载测速脚本（.sh）</a>
         <span class="mono">bash 脚本 · 约 2 KB</span>
@@ -69,21 +71,7 @@
     </section>
 
     <section class="card">
-      <h2>第二步 · 候选 IP</h2>
-      <p class="prose">
-        下面是 Cloudflare 官方 IPv4 段的代表地址（每段均匀取样），共 <b id="ipCount">0</b> 个。
-        点任意一个可以填到下面的输入框里。段列表来源：
-        <span class="mono">cloudflare.com/ips-v4</span>，CF 调整段后这里可能滞后，可自行更新。
-      </p>
-      <div class="ip-grid" id="ipGrid"></div>
-      <div class="field" style="max-width:var(--form)">
-        <button class="ghost" id="copyAllBtn">复制全部 IP</button>
-      </div>
-      <p class="msg" id="gridMsg"></p>
-    </section>
-
-    <section class="card">
-      <h2>第三步 · 写入 hosts</h2>
+      <h2>第二步 · 写入 hosts</h2>
       <p class="prose">把测出来最快的那一个填进来，生成要粘贴的 hosts 行。</p>
       <div class="base-row">
         <label for="pickIp">最快的 IP</label>
@@ -92,6 +80,7 @@
           <button id="genBtn">生成</button>
         </div>
       </div>
+      <p class="msg" id="gridMsg"></p>
       <div id="hostsOut" hidden>
         <label>粘贴到 hosts 文件末尾</label>
         <div class="code-wrap">
@@ -154,56 +143,6 @@
     '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22'
   ];
 
-  function ipToInt(ip) {
-    var p = ip.split('.');
-    return (+p[0]) * 16777216 + (+p[1]) * 65536 + (+p[2]) * 256 + (+p[3]);
-  }
-
-  function intToIp(n) {
-    return [
-      Math.floor(n / 16777216) % 256,
-      Math.floor(n / 65536) % 256,
-      Math.floor(n / 256) % 256,
-      n % 256
-    ].join('.');
-  }
-
-  /**
-   * 每个段均匀取 3 个代表地址，尽量落在整 /16（不足时退到整 /24）的 .1 上。
-   * 必须多取几个：同一个段内不同前缀的路由可能完全不一样——实测同属
-   * 172.64.0.0/13，172.64.0.1 超时，172.66.0.1 却正常。只取一个会漏掉快的。
-   */
-  function sampleIps() {
-    var out = [];
-    var TAKE = 3;
-    for (var i = 0; i < RANGES.length; i++) {
-      var parts = RANGES[i].split('/');
-      var base = ipToInt(parts[0]);
-      var size = Math.pow(2, 32 - parseInt(parts[1], 10));
-      var units = Math.floor(size / 65536);
-      var take = units >= 1 ? Math.min(TAKE, units) : TAKE;
-      var step;
-      if (units >= 1) {
-        step = Math.max(1, Math.floor(units / take)) * 65536;
-      } else {
-        var blocks24 = Math.max(1, Math.floor(size / 256));
-        step = Math.max(1, Math.floor(blocks24 / take)) * 256;
-      }
-      for (var k = 0; k < take; k++) {
-        var offset = k * step;
-        if (offset + 256 > size) break;
-        out.push(intToIp(base + offset + 1));
-      }
-    }
-    return out;
-  }
-
-  var IPS = sampleIps();
-
-  function quotedList() {
-    return IPS.map(function (ip) { return "'" + ip + "'"; }).join(',');
-  }
-
 
   /**
    * 生成可双击运行的 .bat。
@@ -212,24 +151,34 @@
    * .bat 必须用 CRLF 换行，否则 cmd 解析会出问题。
    */
   function buildBat() {
-    var ps = "$ErrorActionPreference='SilentlyContinue';"
-      + "$ips=@(" + quotedList() + ");"
-      + "$r=foreach($ip in $ips){"
-      + "$c=New-Object Net.Sockets.TcpClient;"
-      + "$sw=[Diagnostics.Stopwatch]::StartNew();"
-      + "$ok=$false;"
-      + "try{$t=$c.ConnectAsync($ip,443);$ok=$t.Wait(1500)}catch{}"
-      + "finally{$c.Dispose()};"
-      + "if($ok){[pscustomobject]@{IP=$ip;MS=[int]$sw.ElapsedMilliseconds}}"
-      + "};"
-      + "Write-Host '';"
-      + "if($r){"
-      + "Write-Host '  Fastest 5, lower is better:' -ForegroundColor Green;"
-      + "Write-Host '';"
-      + "$r|Sort-Object MS|Select-Object -First 5|Format-Table -AutoSize"
-      + "}else{"
-      + "Write-Host '  No reachable IP found. Direct access to Cloudflare may be blocked.' -ForegroundColor Red"
-      + "}";
+    var bakedRanges = RANGES.map(function (r) { return "'" + r + "'"; }).join(',');
+    var ps = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      "$cidrs=@()",
+      "try{$txt=(Invoke-WebRequest -Uri 'https://cloudflare.com/ips-v4' -UseBasicParsing -TimeoutSec 8).Content;$cidrs=@([regex]::Split($txt,'\\r?\\n')|Where-Object{$_ -match '^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$'})}catch{}",
+      "$src='cloudflare.com/ips-v4';if($cidrs.Count -eq 0){$cidrs=@(" + bakedRanges + ");$src='built-in history'}",
+      "function ip2int([string]$ip){$p=$ip.Split('.');return ([int64]$p[0]*16777216+[int64]$p[1]*65536+[int64]$p[2]*256+[int64]$p[3])}",
+      "function oct([int64]$n,[int64]$div){return [int]([int64][math]::Floor($n/$div)-[int64][math]::Floor($n/($div*256))*256)}",
+      "function int2ip([int64]$n){return (oct $n 16777216).ToString()+'.'+(oct $n 65536).ToString()+'.'+(oct $n 256).ToString()+'.'+(oct $n 1).ToString()}",
+      "$ips=@();foreach($cidr in $cidrs){$parts=$cidr.Split('/');$base=ip2int $parts[0];$size=[math]::Pow(2,32-[int]$parts[1]);$units=[math]::Floor($size/65536);if($units -ge 1){$take=[int][math]::Min(3,$units)}else{$take=3};if($units -ge 1){$step=[math]::Max(1,[math]::Floor($units/$take))*65536}else{$b=[math]::Max(1,[math]::Floor($size/256));$step=[math]::Max(1,[math]::Floor($b/$take))*256};for($k=0;$k -lt $take;$k++){$off=$k*$step;if($off+256 -gt $size){break};$ips+=int2ip ([int64]($base+$off+1))}}",
+      "Write-Host ('  IP source: '+$src+'  candidates: '+$ips.Count)",
+      "$r=foreach($ip in $ips){",
+      "$c=New-Object Net.Sockets.TcpClient;",
+      "$sw=[Diagnostics.Stopwatch]::StartNew();",
+      "$ok=$false;",
+      "try{$t=$c.ConnectAsync($ip,443);$ok=$t.Wait(1500)}catch{}",
+      "finally{$c.Dispose()};",
+      "if($ok){[pscustomobject]@{IP=$ip;MS=[int]$sw.ElapsedMilliseconds}}",
+      "};",
+      "Write-Host '';",
+      "if($r){",
+      "Write-Host '  Fastest 5, lower is better:' -ForegroundColor Green;",
+      "Write-Host '';",
+      "$r|Sort-Object MS|Select-Object -First 5|Format-Table -AutoSize",
+      "}else{",
+      "Write-Host '  No reachable IP found. Direct access to Cloudflare may be blocked.' -ForegroundColor Red",
+      "}"
+    ].join(';');
 
     var lines = [
       '@echo off',
@@ -238,7 +187,7 @@
       'echo.',
       'echo   Cloudflare edge IP test',
       'echo   Target: ' + HOST,
-      'echo   Candidate IPs: ' + IPS.length,
+      'echo   Candidate IPs: fetched from cloudflare.com/ips-v4 (or history)',
       'echo.',
       'echo   Measuring TCP handshake to port 443 on each IP.',
       'echo   This takes 1-2 minutes. Keep this window open.',
@@ -272,24 +221,9 @@
   }
 
   function render() {
-    $('ipCount').textContent = String(IPS.length);
     $('shCurlCode').textContent =
       'curl -fsSLO ' + location.origin + '/cf-ip-test.sh\n' +
       'bash cf-ip-test.sh ' + HOST;
-
-    var grid = $('ipGrid');
-    grid.innerHTML = '';
-    IPS.forEach(function (ip) {
-      var b = document.createElement('button');
-      b.className = 'ip-chip';
-      b.type = 'button';
-      b.textContent = ip;
-      b.addEventListener('click', function () {
-        $('pickIp').value = ip;
-        $('pickIp').focus();
-      });
-      grid.appendChild(b);
-    });
   }
 
   function flash(el, text, isErr) {
@@ -349,12 +283,6 @@
     if (!target || !target.textContent) return;
     copyText(target.textContent).then(function (ok) {
       flash($('copyMsg'), ok ? '已复制' : '复制失败，请手动选中', !ok);
-    });
-  });
-
-  $('copyAllBtn').addEventListener('click', function () {
-    copyText(IPS.join('\n')).then(function (ok) {
-      flash($('gridMsg'), ok ? '已复制 ' + IPS.length + ' 个 IP' : '复制失败，请手动选中', !ok);
     });
   });
 
