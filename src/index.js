@@ -801,8 +801,9 @@ async function handleRequest(request, env, ctx) {
       time: new Date().toISOString(),
     });
   }
-  if (path === "/favicon.ico") {
-    return new Response(null, { status: 204 });
+  // 浏览器会自动请求 favicon，必须在登录校验之前返回静态图标
+  if (path === "/favicon.ico" || path === "/favicon.svg") {
+    return env.ASSETS.fetch(new URL(path, request.url).toString());
   }
 
   // 认证接口：注册 / 登录 / 登出 / 当前用户 / 管理员操作。
